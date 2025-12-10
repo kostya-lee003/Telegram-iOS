@@ -1,3 +1,12 @@
+# 🧪 Contest 2025 – Local Setup (Kostya)
+
+> This fork is used for participating in Telegram Design Contest 2025.
+> Below are notes about my local build setup (Apple Silicon, Xcode 16.2, Bazel 7.3.1).
+
+Подробности: [CONTEST_SETUP.md](CONTEST_SETUP.md)
+
+---
+
 # Telegram iOS Source Code Compilation Guide
 
 We welcome all developers to use our API and source code to create applications on our platform.
