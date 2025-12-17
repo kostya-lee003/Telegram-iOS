@@ -6,12 +6,45 @@ import Display
 import UIKitRuntimeUtils
 import AnimatedStickerNode
 import TelegramAnimatedStickerNode
+import LiquidGlassUI
 
 private extension CGRect {
     var center: CGPoint {
         return CGPoint(x: self.midX, y: self.midY)
     }
 }
+
+// For glass
+private final class HidingWindowCaptureSource: LiquidGlassCaptureSource {
+    private weak var window: UIWindow?
+    private weak var viewToHide: UIView?
+    var afterScreenUpdates: Bool = true
+
+    init(window: UIWindow, viewToHide: UIView) {
+        self.window = window
+        self.viewToHide = viewToHide
+    }
+
+    func capture(rectInWindow: CGRect, scale: CGFloat) -> CGImage? {
+        guard let window else { return nil }
+
+        let wasHidden = viewToHide?.isHidden ?? false
+        viewToHide?.isHidden = true
+        defer { viewToHide?.isHidden = wasHidden }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.opaque = false
+        format.scale = scale
+
+        let renderer = UIGraphicsImageRenderer(size: rectInWindow.size, format: format)
+        let image = renderer.image { ctx in
+            ctx.cgContext.translateBy(x: -rectInWindow.origin.x, y: -rectInWindow.origin.y)
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: afterScreenUpdates)
+        }
+        return image.cgImage
+    }
+}
+
 
 private let separatorHeight: CGFloat = 1.0 / UIScreen.main.scale
 private func tabBarItemImage(_ image: UIImage?, title: String, backgroundColor: UIColor, tintColor: UIColor, horizontal: Bool, imageMode: Bool, centered: Bool = false) -> (UIImage, CGFloat) {
@@ -335,6 +368,19 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
                 if let selectedIndex = self.selectedIndex {
                     self.updateNodeImage(selectedIndex, layout: true)
                 }
+                
+                if let capsuleFrame = self.lastCapsuleFrame {
+                    self.glassNode.beginContinuousUpdates()
+                    
+                    self.updateGlassFrame(
+                        capsuleFrame: capsuleFrame,
+                        transition: .animated(duration: 0.25, curve: .easeInOut)
+                    )
+                    
+                    Queue.mainQueue().after(0.25 + 0.05) { [weak self] in
+                        self?.glassNode.endContinuousUpdates(finalOneShot: true)
+                    }
+                }
             }
         }
     }
@@ -353,6 +399,27 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     let backgroundNode: NavigationBackgroundNode
     let separatorNode: ASDisplayNode
     private var tabBarNodeContainers: [TabBarNodeContainer] = []
+    
+    private let glassNode: LiquidGlassNode = {
+        let node = LiquidGlassNode()
+        node.isUserInteractionEnabled = false
+        node.configuration.downscale = 0.55
+        node.configuration.refraction = 0.14
+        node.configuration.chroma = 0.22
+        node.configuration.shadowOffset = 8
+        node.configuration.shadowBlur = 20
+        node.configuration.shadowStrength = 0.10
+        node.configuration.rimThickness = 2.2
+        node.configuration.rimStrength = 1.25
+        node.configuration.lightDir = .init(0.9, -0.35) // подсветка справа-сверху
+        node.configuration.alpha = 1.0
+
+        node.shape = .roundedRect(cornerRadius: 30) // потом обновим под высоту
+        return node
+    }()
+
+    private var glassCaptureSource: LiquidGlassCaptureSource?
+    private var lastCapsuleFrame: CGRect?
     
     private var tapRecognizer: TapLongTapOrDoubleTapGestureRecognizer?
     
@@ -397,6 +464,31 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
         self.view.addGestureRecognizer(recognizer)
     }
     
+    override func didEnterHierarchy() {
+        super.didEnterHierarchy()
+        ensureGlassCaptureSource()
+        glassNode.requestOneShotUpdate()
+    }
+    
+    override func didExitHierarchy() {
+        super.didExitHierarchy()
+        self.glassCaptureSource = nil
+        self.glassNode.captureSource = nil
+    }
+    
+    private func ensureGlassCaptureSource() {
+        if self.glassNode.captureSource != nil { return }
+
+        // форсим загрузку view (убираем зависимость от isNodeLoaded)
+        let glassView = self.glassNode.view
+
+        guard let window = self.view.window else { return }
+
+        let source = HidingWindowCaptureSource(window: window, viewToHide: glassView)
+        self.glassCaptureSource = source      // strong (важно, потому что в glassNode оно weak)
+        self.glassNode.captureSource = source
+    }
+    
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
         if otherGestureRecognizer is UIPanGestureRecognizer {
             return false
@@ -405,6 +497,17 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     }
     
     @objc private func tapLongTapOrDoubleTapGesture(_ recognizer: TapLongTapOrDoubleTapGestureRecognizer) {
+        // Glass
+        switch recognizer.state {
+        case .began:
+            self.glassNode.beginContinuousUpdates()
+        case .ended, .cancelled, .failed:
+            self.glassNode.endContinuousUpdates(finalOneShot: true)
+        default:
+            break
+        }
+        
+        // Main gesture
         switch recognizer.state {
         case .ended:
             if let (gesture, location) = recognizer.lastRecognizedGestureAndLocation {
@@ -547,6 +650,17 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
         
         self.tabBarNodeContainers = tabBarNodeContainers
         
+        if let last = self.tabBarNodeContainers.last?.imageNode {
+            if self.glassNode.supernode != nil {
+                self.glassNode.removeFromSupernode()
+            }
+            self.insertSubnode(self.glassNode, aboveSubnode: last)
+        } else {
+            if self.glassNode.supernode == nil {
+                self.addSubnode(self.glassNode)
+            }
+        }
+        
         self.setNeedsLayout()
     }
     
@@ -666,7 +780,44 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
         }
     }
     
-    
+    private func updateGlassFrame(capsuleFrame: CGRect, transition: ContainedViewLayoutTransition) {
+        guard
+            let selectedIndex = self.selectedIndex,
+            selectedIndex >= 0,
+            selectedIndex < self.tabBarNodeContainers.count
+        else {
+            self.glassNode.isHidden = true
+            return
+        }
+
+        let selectedNode = self.tabBarNodeContainers[selectedIndex].imageNode
+        guard selectedNode.isUserInteractionEnabled else {
+            self.glassNode.isHidden = true
+            return
+        }
+
+        let size = CGSize(width: 80.0, height: 60.0)
+        let center = CGPoint(x: selectedNode.frame.midX, y: capsuleFrame.midY)
+
+        var frame = CGRect(
+            x: center.x - size.width / 2.0,
+            y: center.y - size.height / 2.0,
+            width: size.width,
+            height: size.height
+        )
+
+        // clamp inside capsule horizontally
+        let pad: CGFloat = 8.0
+        frame.origin.x = min(max(frame.origin.x, capsuleFrame.minX + pad), capsuleFrame.maxX - pad - frame.width)
+        frame.origin.y = capsuleFrame.minY + (capsuleFrame.height - frame.height) / 2.0
+
+        self.glassNode.shape = .roundedRect(cornerRadius: frame.height / 2.0)
+        self.glassNode.isHidden = false
+        transition.updateFrame(node: self.glassNode, frame: frame)
+        
+        
+    }
+
     func updateLayout(
         size: CGSize,
         leftInset: CGFloat,
@@ -698,6 +849,7 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
             width: capsuleWidth,
             height: capsuleHeight
         )
+        self.lastCapsuleFrame = capsuleFrame
 
         transition.updateFrame(node: self.backgroundNode, frame: capsuleFrame)
         self.backgroundNode.cornerRadius = capsuleHeight / 2.0
@@ -883,6 +1035,11 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
                 }
             }
         }
+        if let capsuleFrame = self.lastCapsuleFrame {
+            self.updateGlassFrame(capsuleFrame: capsuleFrame, transition: transition)
+        }
+
+        self.ensureGlassCaptureSource()
     }
     
     private func tapped(at location: CGPoint, longTap: Bool) {
@@ -909,13 +1066,13 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
             
             if let closestNode = closestNode {
                 let container = self.tabBarNodeContainers[closestNode.0]
-                let previousSelectedIndex = self.selectedIndex
+//                let previousSelectedIndex = self.selectedIndex
                 self.itemSelected(closestNode.0, longTap, [container.imageNode.imageNode, container.imageNode.textImageNode, container.badgeContainerNode])
-                if previousSelectedIndex != closestNode.0 {
-                    if let selectedIndex = self.selectedIndex, let _ = self.tabBarItems[selectedIndex].item.animationName {
-                        container.imageNode.animationNode.play(firstFrame: false, fromIndex: nil)
-                    }
-                }
+//                if previousSelectedIndex != closestNode.0 {
+//                    if let selectedIndex = self.selectedIndex, let _ = self.tabBarItems[selectedIndex].item.animationName {
+//                        container.imageNode.animationNode.play(firstFrame: false, fromIndex: nil)
+//                    }
+//                }
             }
         }
     }

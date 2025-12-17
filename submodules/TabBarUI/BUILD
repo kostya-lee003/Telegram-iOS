@@ -16,6 +16,7 @@ swift_library(
         "//submodules/AnimatedStickerNode:AnimatedStickerNode",
         "//submodules/TelegramAnimatedStickerNode:TelegramAnimatedStickerNode",
         "//submodules/TelegramPresentationData:TelegramPresentationData",
+        "//submodules/LiquidGlassUI:LiquidGlassUI",
     ],
     visibility = [
         "//visibility:public",
