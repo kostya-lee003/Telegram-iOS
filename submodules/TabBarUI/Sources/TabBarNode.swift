@@ -666,14 +666,46 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
         }
     }
     
-    func updateLayout(size: CGSize, leftInset: CGFloat, rightInset: CGFloat, additionalSideInsets: UIEdgeInsets, bottomInset: CGFloat, transition: ContainedViewLayoutTransition) {
+    
+    func updateLayout(
+        size: CGSize,
+        leftInset: CGFloat,
+        rightInset: CGFloat,
+        additionalSideInsets: UIEdgeInsets,
+        bottomInset: CGFloat,
+        transition: ContainedViewLayoutTransition
+    ) {
+        
         self.validLayout = (size, leftInset, rightInset, additionalSideInsets, bottomInset)
 
-        transition.updateFrame(node: self.backgroundNode, frame: CGRect(origin: CGPoint(), size: size))
-        self.backgroundNode.update(size: size, transition: transition)
-        
-        transition.updateFrame(node: self.separatorNode, frame: CGRect(origin: CGPoint(x: 0.0, y: 0.0), size: CGSize(width: size.width, height: separatorHeight)))
-        
+        let containerSize = self.bounds.size
+        let sideInsets = leftInset + rightInset + additionalSideInsets.left + additionalSideInsets.right
+        let capsuleOuterInset: CGFloat = 26.0
+        let capsuleWidth = max(
+            1.0,
+            containerSize.width - sideInsets - capsuleOuterInset * 2.0
+        )
+        let capsuleHeight = 60.0
+
+        let capsuleBottomPadding: CGFloat = 20.0
+        let capsuleOriginY = containerSize.height - bottomInset - capsuleHeight - capsuleBottomPadding
+
+        let capsuleOriginX = leftInset + additionalSideInsets.left + capsuleOuterInset
+
+        let capsuleFrame = CGRect(
+            x: capsuleOriginX,
+            y: max(0.0, capsuleOriginY),
+            width: capsuleWidth,
+            height: capsuleHeight
+        )
+
+        transition.updateFrame(node: self.backgroundNode, frame: capsuleFrame)
+        self.backgroundNode.cornerRadius = capsuleHeight / 2.0
+        self.backgroundNode.clipsToBounds = true
+        self.backgroundNode.update(size: capsuleFrame.size, transition: transition)
+
+        self.separatorNode.isHidden = true
+
         let horizontal = !leftInset.isZero
         if self.horizontal != horizontal {
             self.horizontal = horizontal
@@ -684,16 +716,16 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
         
         if self.tabBarNodeContainers.count != 0 {
             var tabBarNodeContainers = self.tabBarNodeContainers
-            var width = size.width
-            
+            var width = capsuleWidth
+
             var callsTabBarNodeContainer: TabBarNodeContainer?
             if tabBarNodeContainers.count == 4 {
                 callsTabBarNodeContainer = tabBarNodeContainers[1]
             }
-            
+
             if additionalSideInsets.right > 0.0 {
                 width -= additionalSideInsets.right
-                
+
                 if let callsTabBarNodeContainer = callsTabBarNodeContainer {
                     tabBarNodeContainers.remove(at: 1)
                     transition.updateAlpha(node: callsTabBarNodeContainer.imageNode, alpha: 0.0)
@@ -705,87 +737,149 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
                     callsTabBarNodeContainer.imageNode.isUserInteractionEnabled = true
                 }
             }
-            
+
             let distanceBetweenNodes = width / CGFloat(tabBarNodeContainers.count)
-            
             let internalWidth = distanceBetweenNodes * CGFloat(tabBarNodeContainers.count - 1)
             let leftNodeOriginX = (width - internalWidth) / 2.0
-            
+
             for i in 0 ..< tabBarNodeContainers.count {
                 let container = tabBarNodeContainers[i]
                 let node = container.imageNode
                 let nodeSize = node.textImageNode.image?.size ?? CGSize()
-                
-                let originX = floor(leftNodeOriginX + CGFloat(i) * distanceBetweenNodes - nodeSize.width / 2.0)
+
+                let originXInsideCapsule = floor(leftNodeOriginX + CGFloat(i) * distanceBetweenNodes - nodeSize.width / 2.0)
+                let originYInsideCapsule = floor(capsuleFrame.minY + (capsuleHeight - nodeSize.height) / 2.0)
+
+                let nodeFrame = CGRect(
+                    origin: CGPoint(
+                        x: capsuleFrame.minX + originXInsideCapsule,
+                        y: originYInsideCapsule
+                    ),
+                    size: nodeSize
+                )
+
                 let horizontalHitTestInset = distanceBetweenNodes / 2.0 - nodeSize.width / 2.0
-                let nodeFrame = CGRect(origin: CGPoint(x: originX, y: 3.0), size: nodeSize)
+
                 transition.updateFrame(node: node, frame: nodeFrame)
-                node.extractedContainerNode.frame = CGRect(origin: CGPoint(), size: nodeFrame.size)
+
+                node.extractedContainerNode.frame = CGRect(origin: .zero, size: nodeFrame.size)
                 node.extractedContainerNode.contentNode.frame = node.extractedContainerNode.bounds
                 node.extractedContainerNode.contentRect = node.extractedContainerNode.bounds
-                node.containerNode.frame = CGRect(origin: CGPoint(), size: nodeFrame.size)
-                node.hitTestSlop = UIEdgeInsets(top: -3.0, left: -horizontalHitTestInset, bottom: -3.0, right: -horizontalHitTestInset)
-                node.containerNode.hitTestSlop = UIEdgeInsets(top: -3.0, left: -horizontalHitTestInset, bottom: -3.0, right: -horizontalHitTestInset)
-                node.accessibilityFrame = nodeFrame.insetBy(dx: -horizontalHitTestInset, dy: 0.0).offsetBy(dx: 0.0, dy: size.height - nodeSize.height - bottomInset)
+                node.containerNode.frame = CGRect(origin: .zero, size: nodeFrame.size)
+
+                node.hitTestSlop = UIEdgeInsets(
+                    top: -3.0,
+                    left: -horizontalHitTestInset,
+                    bottom: -3.0,
+                    right: -horizontalHitTestInset
+                )
+                node.containerNode.hitTestSlop = node.hitTestSlop
+
+                node.accessibilityFrame = nodeFrame
+                    .insetBy(dx: -horizontalHitTestInset, dy: 0.0)
+                    .offsetBy(dx: 0.0, dy: size.height - nodeSize.height - bottomInset)
+
                 if node.ringColor == nil {
-                    node.imageNode.frame = CGRect(origin: CGPoint(), size: nodeFrame.size)
+                    node.imageNode.frame = CGRect(origin: .zero, size: nodeFrame.size)
                 }
-                node.textImageNode.frame = CGRect(origin: CGPoint(), size: nodeFrame.size)
-                node.contextImageNode.frame = CGRect(origin: CGPoint(), size: nodeFrame.size)
-                node.contextTextImageNode.frame = CGRect(origin: CGPoint(), size: nodeFrame.size)
-                                
+                node.textImageNode.frame = CGRect(origin: .zero, size: nodeFrame.size)
+                node.contextImageNode.frame = CGRect(origin: .zero, size: nodeFrame.size)
+                node.contextTextImageNode.frame = CGRect(origin: .zero, size: nodeFrame.size)
+
                 let scaleFactor: CGFloat = horizontal ? 0.8 : 1.0
                 node.animationContainerNode.subnodeTransform = CATransform3DMakeScale(scaleFactor, scaleFactor, 1.0)
                 let animationOffset: CGPoint = self.tabBarItems[i].item.animationOffset
+
                 let ringImageFrame: CGRect
                 let imageFrame: CGRect
                 if horizontal {
-                    node.animationNode.frame = CGRect(origin: CGPoint(x: -10.0 - UIScreenPixel, y: -4.0 - UIScreenPixel), size: CGSize(width: 51.0, height: 51.0))
-                    ringImageFrame = CGRect(origin: CGPoint(x: UIScreenPixel, y: 5.0 + UIScreenPixel), size: CGSize(width: 23.0, height: 23.0))
+                    node.animationNode.frame = CGRect(
+                        origin: CGPoint(x: -10.0 - UIScreenPixel, y: -4.0 - UIScreenPixel),
+                        size: CGSize(width: 51.0, height: 51.0)
+                    )
+                    ringImageFrame = CGRect(
+                        origin: CGPoint(x: UIScreenPixel, y: 5.0 + UIScreenPixel),
+                        size: CGSize(width: 23.0, height: 23.0)
+                    )
                     imageFrame = ringImageFrame.insetBy(dx: -1.0 + UIScreenPixel, dy: -1.0 + UIScreenPixel)
                 } else {
-                    node.animationNode.frame = CGRect(origin: CGPoint(x: floorToScreenPixels((nodeSize.width - 51.0) / 2.0), y: -10.0 - UIScreenPixel).offsetBy(dx: animationOffset.x, dy: animationOffset.y), size: CGSize(width: 51.0, height: 51.0))
-                    ringImageFrame = CGRect(origin: CGPoint(x: floorToScreenPixels((nodeSize.width - 29.0) / 2.0), y: 1.0), size: CGSize(width: 29.0, height: 29.0))
+                    node.animationNode.frame = CGRect(
+                        origin: CGPoint(
+                            x: floorToScreenPixels((nodeSize.width - 51.0) / 2.0),
+                            y: -10.0 - UIScreenPixel
+                        ).offsetBy(dx: animationOffset.x, dy: animationOffset.y),
+                        size: CGSize(width: 51.0, height: 51.0)
+                    )
+                    ringImageFrame = CGRect(
+                        origin: CGPoint(
+                            x: floorToScreenPixels((nodeSize.width - 29.0) / 2.0),
+                            y: 1.0
+                        ),
+                        size: CGSize(width: 29.0, height: 29.0)
+                    )
                     imageFrame = ringImageFrame.insetBy(dx: -1.0, dy: -1.0)
                 }
-                node.ringImageNode.bounds = CGRect(origin: CGPoint(), size: ringImageFrame.size)
+
+                node.ringImageNode.bounds = CGRect(origin: .zero, size: ringImageFrame.size)
                 node.ringImageNode.position = ringImageFrame.center
-                
                 if node.ringColor != nil {
-                    node.imageNode.bounds = CGRect(origin: CGPoint(), size: imageFrame.size)
+                    node.imageNode.bounds = CGRect(origin: .zero, size: imageFrame.size)
                     node.imageNode.position = imageFrame.center
                 }
-                
+
                 if container.badgeValue != container.appliedBadgeValue {
                     container.appliedBadgeValue = container.badgeValue
                     if let badgeValue = container.badgeValue, !badgeValue.isEmpty {
-                        container.badgeTextNode.attributedText = NSAttributedString(string: badgeValue, font: badgeFont, textColor: self.theme.tabBarBadgeTextColor)
+                        container.badgeTextNode.attributedText = NSAttributedString(
+                            string: badgeValue,
+                            font: badgeFont,
+                            textColor: self.theme.tabBarBadgeTextColor
+                        )
                         container.badgeContainerNode.isHidden = false
                     } else {
                         container.badgeContainerNode.isHidden = true
                     }
                 }
-                
+
                 if !container.badgeContainerNode.isHidden {
-                    var hasSingleLetterValue: Bool = false
+                    var hasSingleLetterValue = false
                     if let string = container.badgeTextNode.attributedText?.string {
                         hasSingleLetterValue = string.count == 1
                     }
                     let badgeSize = container.badgeTextNode.updateLayout(CGSize(width: 200.0, height: 100.0))
-                    let backgroundSize = CGSize(width: hasSingleLetterValue ? 18.0 : max(18.0, badgeSize.width + 10.0 + 1.0), height: 18.0)
+                    let backgroundSize = CGSize(
+                        width: hasSingleLetterValue ? 18.0 : max(18.0, badgeSize.width + 10.0 + 1.0),
+                        height: 18.0
+                    )
+
                     let backgroundFrame: CGRect
                     if horizontal {
-                        backgroundFrame = CGRect(origin: CGPoint(x: 13.0, y: 0.0), size: backgroundSize)
+                        backgroundFrame = CGRect(
+                            origin: CGPoint(x: 13.0, y: 0.0),
+                            size: backgroundSize
+                        )
                     } else {
                         let contentWidth: CGFloat = 25.0
-                        backgroundFrame = CGRect(origin: CGPoint(x: floor(node.frame.width / 2.0) + contentWidth - backgroundSize.width - 5.0, y: self.centered ? 6.0 : -1.0), size: backgroundSize)
+                        backgroundFrame = CGRect(
+                            origin: CGPoint(
+                                x: floor(node.frame.width / 2.0) + contentWidth - backgroundSize.width - 5.0,
+                                y: self.centered ? 6.0 : -1.0
+                            ),
+                            size: backgroundSize
+                        )
                     }
+
                     transition.updateFrame(node: container.badgeContainerNode, frame: backgroundFrame)
-                    container.badgeBackgroundNode.frame = CGRect(origin: CGPoint(), size: backgroundFrame.size)
-                   
+                    container.badgeBackgroundNode.frame = CGRect(origin: .zero, size: backgroundFrame.size)
                     container.badgeContainerNode.subnodeTransform = CATransform3DMakeScale(scaleFactor, scaleFactor, 1.0)
-                    
-                    container.badgeTextNode.frame = CGRect(origin: CGPoint(x: floorToScreenPixels((backgroundFrame.size.width - badgeSize.width) / 2.0), y: 1.0), size: badgeSize)
+
+                    container.badgeTextNode.frame = CGRect(
+                        origin: CGPoint(
+                            x: floorToScreenPixels((backgroundFrame.size.width - badgeSize.width) / 2.0),
+                            y: 1.0
+                        ),
+                        size: badgeSize
+                    )
                 }
             }
         }
