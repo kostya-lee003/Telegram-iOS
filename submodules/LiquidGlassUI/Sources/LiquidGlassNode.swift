@@ -2,6 +2,53 @@ import UIKit
 import AsyncDisplayKit
 import MetalKit
 
+// For glass
+public final class HidingWindowCaptureSource: LiquidGlassCaptureSource {
+    private weak var window: UIWindow?
+    private weak var viewToHide: UIView?
+    public var afterScreenUpdates: Bool = true
+
+    public init(window: UIWindow, viewToHide: UIView) {
+        self.window = window
+        self.viewToHide = viewToHide
+    }
+
+    public func capture(rectInWindow: CGRect, scale: CGFloat) -> CGImage? {
+        guard let window else { return nil }
+
+        let wasHidden = viewToHide?.isHidden ?? false
+        let wasAlpha  = viewToHide?.alpha ?? 1.0
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        viewToHide?.isHidden = true
+        viewToHide?.alpha    = 0.0
+        CATransaction.commit()
+
+        defer {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            viewToHide?.isHidden = wasHidden
+            viewToHide?.alpha    = wasAlpha
+            CATransaction.commit()
+        }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.opaque = false
+        format.scale  = scale
+
+        let renderer = UIGraphicsImageRenderer(size: rectInWindow.size, format: format)
+        let image = renderer.image { ctx in
+            ctx.cgContext.translateBy(x: -rectInWindow.origin.x,
+                                      y: -rectInWindow.origin.y)
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+
+        return image.cgImage
+    }
+}
+
+
 public protocol LiquidGlassCaptureSource: AnyObject {
     /// rectInWindow: область в координатах UIWindow, которую надо захватить
     func capture(rectInWindow: CGRect, scale: CGFloat) -> CGImage?
@@ -161,7 +208,12 @@ public final class LiquidGlassNode: ASDisplayNode {
 
         pendingOneShot = false
 
-        let rectInWindow = view.convert(view.bounds, to: window)
+        let rectInWindow: CGRect
+        if let pres = view.layer.presentation(), let superview = view.superview {
+            rectInWindow = superview.convert(pres.frame, to: window)
+        } else {
+            rectInWindow = view.convert(view.bounds, to: window)
+        }
         let scale = (window.screen.scale * configuration.downscale)
 
         if let cgImage = captureSource.capture(rectInWindow: rectInWindow, scale: scale) {
