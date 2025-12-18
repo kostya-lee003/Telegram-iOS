@@ -1052,26 +1052,6 @@ extension TabBarNode {
         return 1.0 - pow(1.0 - t, 3.0)
     }
 
-//    private func makeGlassFrame(for index: Int, capsuleFrame: CGRect) -> CGRect? {
-//        guard index >= 0, index < self.tabBarNodeContainers.count else { return nil }
-//        let selectedNode = self.tabBarNodeContainers[index].imageNode
-//        guard selectedNode.isUserInteractionEnabled else { return nil }
-//
-//        let size = CGSize(width: 80.0, height: 60.0)
-//        let center = CGPoint(x: selectedNode.frame.midX, y: capsuleFrame.midY)
-//
-//        var frame = CGRect(
-//            x: center.x - size.width / 2.0,
-//            y: center.y - size.height / 2.0,
-//            width: size.width,
-//            height: size.height
-//        )
-//
-//        let pad: CGFloat = 8.0
-//        frame.origin.x = min(max(frame.origin.x, capsuleFrame.minX + pad), capsuleFrame.maxX - pad - frame.width)
-//        frame.origin.y = capsuleFrame.minY + (capsuleFrame.height - frame.height) / 2.0
-//        return frame
-//    }
     private func makeGlassFrame(for index: Int, capsuleFrame: CGRect) -> CGRect? {
         guard index >= 0, index < self.tabBarNodeContainers.count else { return nil }
         let selectedNode = self.tabBarNodeContainers[index].imageNode
@@ -1088,27 +1068,20 @@ extension TabBarNode {
         let width = max(1.0, (self.bounds.width - sideInset * 2.0) / CGFloat(visibleTabsCount))
 
         let centerX = selectedNode.frame.midX
-        var frame = CGRect(
+        let frame = CGRect(
             x: centerX - width / 2.0,
             y: capsuleFrame.minY - extraV,
             width: width,
             height: height
         )
 
-        let pad: CGFloat = 8.0
-        frame.origin.x = min(
-            max(frame.origin.x, capsuleFrame.minX + pad),
-            capsuleFrame.maxX - pad - frame.width
-        )
-
         return frame
     }
 
-
     private func applyGlassFrame(_ frame: CGRect) {
-        self.glassNode.shape = .roundedRect(cornerRadius: frame.height / 2.0)
         self.glassNode.isHidden = false
         self.glassNode.frame = frame
+        self.glassNode.shape = .roundedRect(cornerRadius: frame.height/2.0 + 20)
     }
     
     private func stopGlassMove(completed: Bool) {
