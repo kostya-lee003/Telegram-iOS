@@ -60,6 +60,7 @@ private enum LiquidGlassShaderSource {
         float2 c = u.center * u.size;
         float2 toCenterPx = (p - c);
 
+        // --- Shape SDF (circle / rounded rect) ---
         float dist;
         if (u.shapeType == 0) {
             float radius = min(u.size.x, u.size.y) * 0.5;
@@ -69,16 +70,30 @@ private enum LiquidGlassShaderSource {
             dist = sdRoundedRect(toCenterPx, halfSize, u.cornerRadiusPx);
         }
 
+        // Anti-aliased inside mask (rounded corners clipping)
         float aa = 1.0;
         float inside = smoothstep(0.0, -aa, dist);
 
+        // ============================================================
+        // EDGE-BASED REFRACTION + EDGE-ONLY CHROMA  (target look)
+        // ============================================================
+
         float radiusForFalloff = min(u.size.x, u.size.y) * 0.5;
         float normalizedDist = clamp(length(toCenterPx) / max(radiusForFalloff, 1.0), 0.0, 1.0);
-        float falloff = 1.0 - (normalizedDist * normalizedDist);
 
-        float2 refractedOffsetPx = toCenterPx * falloff * u.refraction;
+        float2 dir = normalize(toCenterPx + float2(1e-5));
 
-        float chromaK = normalizedDist * u.chroma;
+        // 0 in the center, rising sharply towards the edges
+        const float edgeStart = 0.45;
+        const float edgeExp   = 6.0;
+        float edgeMask = smoothstep(edgeStart, 1.0, normalizedDist);
+        float edgeSharp = pow(edgeMask, edgeExp);
+
+        // Offset in pixels (scaled by radius)
+        float2 refractedOffsetPx = dir * (edgeSharp * u.refraction * radiusForFalloff);
+
+        // Chrome only on the edges
+        float chromaK = edgeSharp * u.chroma;
         float2 offR = refractedOffsetPx * (1.0 + chromaK);
         float2 offB = refractedOffsetPx * (1.0 - chromaK);
 
@@ -94,6 +109,20 @@ private enum LiquidGlassShaderSource {
         outCol.r = colR.r;
         outCol.b = colB.b;
 
+        // Slight milkiness/lightening INSIDE the lens
+        const float lift = 0.04; // 0.02..0.06 подбирай
+        outCol.rgb = mix(outCol.rgb, half3(1.0h), half(lift * inside));
+
+        // Important: the basic "snapshot" is shown only inside the form
+        outCol.rgb *= half(inside);
+
+        // Basic alpha is strictly based on the shape mask (clipping rounded corners)
+        outCol.a = half(inside * u.alpha);
+
+        // ============================================================
+        // Shadow ring (as you had it), but scaled to u.alpha
+        // ============================================================
+
         float2 shadowCenter = c + float2(u.shadowOffset, u.shadowOffset);
         float shadowDist = length(p - shadowCenter);
 
@@ -103,21 +132,31 @@ private enum LiquidGlassShaderSource {
 
         if (inShadowRing) {
             float t = (shadowDist - radiusApprox) / max(u.shadowBlur, 1.0);
-            float strength = smoothstep(1.0, 0.0, t) * u.shadowStrength;
-            outCol.rgb = mix(outCol.rgb, half3(0.0), half(strength));
+            float strength = smoothstep(1.0, 0.0, t) * u.shadowStrength * u.alpha;
+
+            // black "haze" around
+            outCol.rgb = mix(outCol.rgb, half3(0.0h), half(strength));
             outCol.a = max(outCol.a, half(strength));
         }
 
-        float edge = abs(dist);
-        float rim = smoothstep(u.rimThickness, 0.0, edge) * u.rimStrength;
+        // ============================================================
+        // Symmetrical rim + border (without unilateral rimBias)
+        // ============================================================
 
-        float2 dir = normalize(toCenterPx);
-        float rimBias = clamp(dot(dir, u.lightDir), 0.0, 1.0);
+        float edgeAbs = abs(dist);
 
-        outCol.rgb += half3(1.1h, 1.1h, 1.2h) * half(rim * rimBias);
+        // soft rim inside
+        float rim = smoothstep(u.rimThickness, 0.0, edgeAbs) * u.rimStrength;
+        outCol.rgb += half3(1.05h, 1.05h, 1.10h) * half(rim) * half(inside);
 
-        float alpha = max(inside, (float)outCol.a);
-        outCol.a = half(alpha * u.alpha);
+        // thin edge border (360°)
+        const float borderW = 1.0;
+        const float borderAlpha = 0.10;
+        half3 borderColor = half3(0.92h, 0.96h, 1.00h);
+
+        float border = smoothstep(borderW, 0.0, edgeAbs);
+        outCol.rgb = mix(outCol.rgb, borderColor, half(borderAlpha * border * u.alpha));
+        outCol.a = max(outCol.a, half(borderAlpha * border * u.alpha));
 
         if (outCol.a <= 0.001h) {
             return half4(0.0h);
@@ -125,6 +164,7 @@ private enum LiquidGlassShaderSource {
 
         return outCol;
     }
+
     """
 }
 

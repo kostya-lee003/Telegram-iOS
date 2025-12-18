@@ -379,7 +379,7 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     private let highlightCapsuleNode: ASDisplayNode = {
         let node = ASDisplayNode()
         node.isUserInteractionEnabled = false
-        node.backgroundColor = UIColor.blue.withAlphaComponent(0.2)
+        node.backgroundColor = UIColor.blue.withAlphaComponent(0.1)
         node.isOpaque = false
         node.clipsToBounds = true
         return node
@@ -389,14 +389,14 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
         let node = LiquidGlassNode()
         node.isUserInteractionEnabled = false
         node.configuration.downscale = 0.55
-        node.configuration.refraction = 0.14
-        node.configuration.chroma = 0.22
+        node.configuration.refraction = 0.16
         node.configuration.shadowOffset = 8
         node.configuration.shadowBlur = 20
-        node.configuration.shadowStrength = 0.10
-        node.configuration.rimThickness = 2.2
-        node.configuration.rimStrength = 1.25
+        node.configuration.shadowStrength = 0.08
         node.configuration.alpha = 0.0
+        node.configuration.rimThickness = 1.6
+        node.configuration.rimStrength  = 1.05
+        node.configuration.chroma = 0.16
         node.shape = .roundedRect(cornerRadius: 0)
         return node
     }()
@@ -413,7 +413,7 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     private var glassMoveLink: CADisplayLink?
 
     private var glassAnimStartTime: CFTimeInterval = 0
-    private var glassAnimDuration: Double = 0.4
+    private var glassAnimDuration: Double = 0.55
 
     private var glassAnimFromX: CGFloat = 0
     private var glassAnimToX: CGFloat = 0
@@ -1188,7 +1188,7 @@ extension TabBarNode {
             guard abs(self.glassAnimStartTime - startToken) < 0.0001 else { return }
             guard let window = self.view.window else { return }
 
-            let maxScale: CGFloat = 1.15
+            let maxScale: CGFloat = 1.3
 
             var fromFrame = targetFrame
             fromFrame.origin.x = currentX
@@ -1272,7 +1272,7 @@ private extension TabBarNode {
         // t: 0...1
         let phase1End: CGFloat = 0.3
         let phase3Start: CGFloat = 0.7
-//        let maxScale: CGFloat = 1.25
+//        let maxScale: CGFloat = 1.3
 
         let glassAlpha: CGFloat
         let highlightAlpha: CGFloat
