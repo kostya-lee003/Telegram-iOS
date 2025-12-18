@@ -404,7 +404,7 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     private var glassMoveLink: CADisplayLink?
 
     private var glassAnimStartTime: CFTimeInterval = 0
-    private var glassAnimDuration: Double = 0.5
+    private var glassAnimDuration: Double = 1.5
 
     private var glassAnimFromX: CGFloat = 0
     private var glassAnimToX: CGFloat = 0
@@ -457,7 +457,7 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     override func didEnterHierarchy() {
         super.didEnterHierarchy()
         ensureGlassCaptureSource()
-        glassNode.requestOneShotUpdate()
+        glassNode.renderCurrentFrame()
     }
     
     override func didExitHierarchy() {
@@ -481,7 +481,7 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
         if self.glassEnvironment == nil {
             let env = LiquidGlassSnapshotEnvironment()
             env.captureSource = source
-            env.maxSnapshotFPS = 5
+            env.maxSnapshotFPS = 60
 //            env.downscale = self.glassNode.configuration.downscale
             self.glassEnvironment = env
         } else {
@@ -499,16 +499,6 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     }
     
     @objc private func tapLongTapOrDoubleTapGesture(_ recognizer: TapLongTapOrDoubleTapGestureRecognizer) {
-        // Glass
-        switch recognizer.state {
-        case .began:
-            self.glassNode.beginContinuousUpdates()
-        case .ended, .cancelled, .failed:
-            self.glassNode.endContinuousUpdates(finalOneShot: true)
-        default:
-            break
-        }
-        
         // Main gesture
         switch recognizer.state {
         case .ended:
@@ -1087,7 +1077,7 @@ extension TabBarNode {
         self.glassNode.isHidden = false
         self.glassNode.frame = frame
     }
-
+    
     private func stopGlassMove(completed: Bool) {
         self.glassMoveLink?.invalidate()
         self.glassMoveLink = nil
@@ -1097,9 +1087,8 @@ extension TabBarNode {
             var finalFrame = self.glassAnimBaseFrame
             finalFrame.origin.x = self.glassAnimToX
             self.applyGlassFrame(finalFrame)
+            self.glassNode.renderCurrentFrame()
         }
-
-        self.glassNode.endContinuousUpdates(finalOneShot: true)
     }
 
     private func startGlassMove(to targetFrame: CGRect, fromX: CGFloat?, duration: Double) {
@@ -1134,9 +1123,18 @@ extension TabBarNode {
         startFrame.origin.x = currentX
         applyGlassFrame(startFrame)
 
-        glassNode.beginContinuousUpdates()
-
         let link = CADisplayLink(target: self, selector: #selector(stepGlassMove))
+
+        if #available(iOS 15.0, *) {
+            link.preferredFrameRateRange = CAFrameRateRange(
+                minimum: 50,
+                maximum: 60,
+                preferred: 60
+            )
+        } else {
+            link.preferredFramesPerSecond = 60
+        }
+
         link.add(to: .main, forMode: .common)
         glassMoveLink = link
     }
@@ -1153,6 +1151,8 @@ extension TabBarNode {
         frame.origin.x = x
         self.applyGlassFrame(frame)
 
+        self.glassNode.renderCurrentFrame(now: now)
+        
         if t >= 1.0 - 0.0001 {
             self.stopGlassMove(completed: true)
         }

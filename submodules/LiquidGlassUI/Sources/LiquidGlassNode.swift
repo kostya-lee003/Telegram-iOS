@@ -129,17 +129,11 @@ public final class LiquidGlassNode: ASDisplayNode {
     /// Margin вокруг rectInWindow, чтобы во время движения кроп всегда попадал в общий snapshot.
     public var snapshotMargin: UIEdgeInsets = .init(top: 18, left: 44, bottom: 18, right: 44)
     
-    public var updateMode: UpdateMode = .idleOneShot
-
-    private var pendingOneShot = false
-
-
     // MARK: Private
 
     private var mtkView: MTKView?
     private var renderer: LiquidGlassRenderer?
 
-    private var displayLink: CADisplayLink?
     private var lastTick: CFTimeInterval = 0
 
     public override init() {
@@ -169,59 +163,11 @@ public final class LiquidGlassNode: ASDisplayNode {
         renderer.shape = shape
         self.renderer = renderer
     }
-
-    deinit {
-        stop()
-    }
     
-    private func ensureDisplayLink() {
-        guard displayLink == nil else { return }
-        lastTick = 0
-        let link = CADisplayLink(target: self, selector: #selector(tick))
+    public func renderCurrentFrame(now: CFTimeInterval = CACurrentMediaTime()) {
+        guard let mtkView, let renderer else { return }
+        guard let window = view.window else { return }
 
-        if #available(iOS 15.0, *) {
-            link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
-        } else {
-            link.preferredFramesPerSecond = 60
-        }
-//        if #available(iOS 15.0, *) {
-//            link.preferredFrameRateRange = CAFrameRateRange(minimum: 20, maximum: 40, preferred: 30)
-//        } else {
-//            link.preferredFramesPerSecond = 30
-//        }
-
-        link.add(to: .main, forMode: .common)
-        displayLink = link
-    }
-    
-    public func start() {
-        ensureDisplayLink()
-    }
-
-    public func stop() {
-        displayLink?.invalidate()
-        displayLink = nil
-    }
-
-    @objc private func tick() {
-        guard let mtkView, let renderer else { stop(); return }
-        guard let window = view.window else { stop(); return }
-
-        // если idle и нет запроса — сразу стоп
-        let shouldRun = (updateMode == .continuous) || pendingOneShot
-        guard shouldRun else { stop(); return }
-
-        let now = CACurrentMediaTime()
-
-        // В continuous строго 60fps, в idleOneShot можно оставить maxFPS (или тоже 60 — на твой вкус)
-        let targetFPS: Double = (updateMode == .continuous) ? 60.0 : Double(max(configuration.maxFPS, 1.0))
-        let minDelta = 1.0 / targetFPS
-        if lastTick != 0, (now - lastTick) < minDelta { return }
-        lastTick = now
-
-        pendingOneShot = false
-
-        // rectInWindow берём по presentation() чтобы совпадало с анимацией
         let rectInWindow: CGRect
         if let pres = view.layer.presentation(), let superview = view.superview {
             rectInWindow = superview.convert(pres.frame, to: window)
@@ -229,12 +175,11 @@ public final class LiquidGlassNode: ASDisplayNode {
             rectInWindow = view.convert(view.bounds, to: window)
         }
 
-        let scale = (window.screen.scale * configuration.downscale)
+        let scale = window.screen.scale * configuration.downscale
 
         var cgImage: CGImage?
 
         if let env = snapshotEnvironment {
-            // если env не настроили captureSource — подхватим из ноды
             if env.captureSource == nil { env.captureSource = captureSource }
             cgImage = env.croppedImage(
                 for: rectInWindow,
@@ -243,7 +188,6 @@ public final class LiquidGlassNode: ASDisplayNode {
                 now: now
             )
         } else if let captureSource {
-            // fallback-режим (старый)
             cgImage = captureSource.capture(rectInWindow: rectInWindow, scale: scale)
         }
 
@@ -251,31 +195,7 @@ public final class LiquidGlassNode: ASDisplayNode {
             renderer.updateBackground(cgImage: cgImage)
             mtkView.setNeedsDisplay()
         }
-
-        if updateMode == .idleOneShot {
-            stop()
-        }
     }
-    
-    public func requestOneShotUpdate() {
-        pendingOneShot = true
-        ensureDisplayLink()
-    }
-
-    public func beginContinuousUpdates() {
-        updateMode = .continuous
-        ensureDisplayLink()
-    }
-
-    public func endContinuousUpdates(finalOneShot: Bool = true) {
-        updateMode = .idleOneShot
-        if finalOneShot {
-            requestOneShotUpdate()
-        } else {
-            stop()
-        }
-    }
-
 }
 
 
@@ -357,7 +277,7 @@ public final class LiquidGlassSnapshotEnvironment {
     public weak var captureSource: LiquidGlassCaptureSource?
 
     /// Лимит частоты обновления общего snapshot (кроп можно делать хоть 60fps)
-    public var maxSnapshotFPS: Double = 5.0
+    public var maxSnapshotFPS: Double = 50.0
 
     /// Запас вокруг области (в points), чтобы во время движения не выбегать за snapshot
     public var defaultMargin: UIEdgeInsets = .init(top: 18, left: 44, bottom: 18, right: 44)
