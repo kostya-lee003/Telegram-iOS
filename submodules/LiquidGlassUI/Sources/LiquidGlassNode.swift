@@ -87,7 +87,7 @@ public struct LiquidGlassConfiguration {
     public var maxFPS: Double = 60.0
     public var downscale: CGFloat = 0.6
 
-    public var refraction: Float = 0.12
+    public var refraction: Float = 0.4
     public var chroma: Float = 0.10
 
     public var shadowOffset: Float = 10.0   // px (в текстуре)
@@ -96,7 +96,7 @@ public struct LiquidGlassConfiguration {
 
     public var rimThickness: Float = 1.5    // px
     public var rimStrength: Float = 0.9     // 0..1
-    public var lightDir: SIMD2<Float> = .init(-0.5, -0.8) // верх-лево
+//    public var lightDir: SIMD2<Float> = .init(-0.5, -0.8) // верх-лево
 
     public var alpha: Float = 1.0
 

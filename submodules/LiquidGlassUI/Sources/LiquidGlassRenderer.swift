@@ -189,7 +189,6 @@ final class LiquidGlassRenderer: NSObject, MTKViewDelegate {
         pipelineDesc.fragmentFunction = library.makeFunction(name: "lg_fragment")
         pipelineDesc.colorAttachments[0].pixelFormat = mtkView.colorPixelFormat
 
-        // alpha blending (чтобы снаружи формы было прозрачно)
         let att = pipelineDesc.colorAttachments[0]!
         att.isBlendingEnabled = true
         att.rgbBlendOperation = .add
@@ -232,7 +231,7 @@ final class LiquidGlassRenderer: NSObject, MTKViewDelegate {
         u.shadowStrength = configuration.shadowStrength
         u.rimThickness = configuration.rimThickness
         u.rimStrength = configuration.rimStrength
-        u.lightDir = simd_normalize(configuration.lightDir)
+//        u.lightDir = simd_normalize(configuration.lightDir)
         u.alpha = configuration.alpha
 
         switch shape {

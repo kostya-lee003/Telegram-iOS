@@ -376,6 +376,15 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     let separatorNode: ASDisplayNode
     private var tabBarNodeContainers: [TabBarNodeContainer] = []
     
+    private let highlightCapsuleNode: ASDisplayNode = {
+        let node = ASDisplayNode()
+        node.isUserInteractionEnabled = false
+        node.backgroundColor = UIColor.blue.withAlphaComponent(0.2)
+        node.isOpaque = false
+        node.clipsToBounds = true
+        return node
+    }()
+
     private let glassNode: LiquidGlassNode = {
         let node = LiquidGlassNode()
         node.isUserInteractionEnabled = false
@@ -387,10 +396,8 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
         node.configuration.shadowStrength = 0.10
         node.configuration.rimThickness = 2.2
         node.configuration.rimStrength = 1.25
-//        node.configuration.lightDir = .init(0.9, -0.35) // подсветка справа-сверху
-        node.configuration.alpha = 1.0
-
-        node.shape = .roundedRect(cornerRadius: 30)
+        node.configuration.alpha = 0.0
+        node.shape = .roundedRect(cornerRadius: 0)
         return node
     }()
 
@@ -643,6 +650,12 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
         
         self.tabBarNodeContainers = tabBarNodeContainers
         
+        self.reloadHighlightedTab()
+        
+        self.setNeedsLayout()
+    }
+    
+    private func reloadHighlightedTab() {
         if let last = self.tabBarNodeContainers.last?.imageNode {
             if self.glassNode.supernode != nil {
                 self.glassNode.removeFromSupernode()
@@ -654,7 +667,10 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
             }
         }
         
-        self.setNeedsLayout()
+        if self.highlightCapsuleNode.supernode != nil {
+            self.highlightCapsuleNode.removeFromSupernode()
+        }
+        self.insertSubnode(self.highlightCapsuleNode, aboveSubnode: glassNode)
     }
     
     private func updateNodeImage(_ index: Int, layout: Bool) {
@@ -999,11 +1015,13 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
                 var current = self.glassNode.frame
                 current.origin.y = target.origin.y
                 current.size = target.size
-                self.applyGlassFrame(current)
-
+                self.applyCapsuleFrame(current)
+                
                 self.glassAnimToX = target.origin.x
             } else {
-                self.applyGlassFrame(target)
+                self.applyCapsuleFrame(target)
+                self.highlightCapsuleNode.alpha = 1.0
+                self.glassNode.configuration.alpha = 0.0
             }
         }
 
@@ -1057,31 +1075,32 @@ extension TabBarNode {
         let selectedNode = self.tabBarNodeContainers[index].imageNode
         guard selectedNode.isUserInteractionEnabled else { return nil }
 
-        let extraV: CGFloat = 10.0
-        let height = capsuleFrame.height + extraV * 2.0
+        let visibleIndices: [Int] = self.tabBarNodeContainers.enumerated().compactMap { (i, c) in
+            c.imageNode.isUserInteractionEnabled ? i : nil
+        }
+        guard let slot = visibleIndices.firstIndex(of: index) else { return nil }
 
-        let sideInset: CGFloat = 16.0
-        let visibleTabsCount = max(
-            1,
-            self.tabBarNodeContainers.filter { $0.imageNode.isUserInteractionEnabled }.count
+        let count = max(1, visibleIndices.count)
+        let tabWidth = floorToScreenPixels(capsuleFrame.width / CGFloat(count))
+        let x = floorToScreenPixels(capsuleFrame.minX + CGFloat(slot) * tabWidth)
+
+        return CGRect(
+            x: x,
+            y: capsuleFrame.minY,
+            width: tabWidth,
+            height: capsuleFrame.height
         )
-        let width = max(1.0, (self.bounds.width - sideInset * 2.0) / CGFloat(visibleTabsCount))
-
-        let centerX = selectedNode.frame.midX
-        let frame = CGRect(
-            x: centerX - width / 2.0,
-            y: capsuleFrame.minY - extraV,
-            width: width,
-            height: height
-        )
-
-        return frame
     }
 
-    private func applyGlassFrame(_ frame: CGRect) {
+    private func applyCapsuleFrame(_ frame: CGRect) {
+        // glass
         self.glassNode.isHidden = false
         self.glassNode.frame = frame
-        self.glassNode.shape = .roundedRect(cornerRadius: frame.height/2.0 + 20)
+        self.glassNode.shape = .roundedRect(cornerRadius: frame.height / 2.0 + 20)
+
+        // highlight
+        self.highlightCapsuleNode.frame = frame
+        self.highlightCapsuleNode.cornerRadius = frame.height / 2.0
     }
     
     private func stopGlassMove(completed: Bool) {
@@ -1090,10 +1109,11 @@ extension TabBarNode {
         self.isGlassAnimating = false
 
         if completed {
-            var finalFrame = self.glassAnimBaseFrame
-            finalFrame.origin.x = self.glassAnimToX
-            self.applyGlassFrame(finalFrame)
-            self.glassNode.renderCurrentFrame()
+            var finalBase = self.glassAnimBaseFrame
+            finalBase.origin.x = self.glassAnimToX
+
+            self.applyPhaseState(t: 1.0)
+            self.applyCapsuleFrame(finalBase)
         }
     }
 
@@ -1125,9 +1145,13 @@ extension TabBarNode {
         glassAnimFromX = currentX
         glassAnimToX   = targetFrame.origin.x
 
+        self.highlightCapsuleNode.alpha = 1.0
+        self.glassNode.configuration.alpha = 0.0
+
         var startFrame = targetFrame
         startFrame.origin.x = currentX
-        applyGlassFrame(startFrame)
+        applyCapsuleFrame(startFrame)
+        applyPhaseState(t: 0.0)
 
         let link = CADisplayLink(target: self, selector: #selector(stepGlassMove))
 
@@ -1184,14 +1208,88 @@ extension TabBarNode {
         let eased = easeOutCubic(t)
         let x = self.glassAnimFromX + (self.glassAnimToX - self.glassAnimFromX) * eased
 
-        var frame = self.glassAnimBaseFrame
-        frame.origin.x = x
-        self.applyGlassFrame(frame)
+        var base = self.glassAnimBaseFrame
+        base.origin.x = x
 
-        self.glassNode.renderCurrentFrame(now: now)
-        
+        self.applyPhaseState(t: t)
+
+        let phase1End: CGFloat = 0.3
+        let phase3Start: CGFloat = 0.7
+        let maxScale: CGFloat = 1.25
+
+        let scale: CGFloat
+        if t <= phase1End {
+            let p = max(0.0, min(1.0, t / phase1End))
+            scale = lerp(1.0, maxScale, easeOutCubic(p))
+        } else if t < phase3Start {
+            scale = maxScale
+        } else {
+            let p = max(0.0, min(1.0, (t - phase3Start) / (1.0 - phase3Start)))
+            scale = lerp(maxScale, 1.0, easeInCubic(p))
+        }
+
+        let frame = scaledAboutCenter(base, scale: scale)
+        self.applyCapsuleFrame(frame)
+
+        if self.glassNode.configuration.alpha > 0.001 {
+            self.glassNode.renderCurrentFrame(now: now)
+        }
+
         if t >= 1.0 - 0.0001 {
             self.stopGlassMove(completed: true)
         }
     }
+}
+
+// MARK: Animation helpers
+private extension TabBarNode {
+    private func lerp(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat {
+        return a + (b - a) * t
+    }
+
+    private func easeInCubic(_ t: CGFloat) -> CGFloat {
+        return t * t * t
+    }
+
+    private func scaledAboutCenter(_ frame: CGRect, scale: CGFloat) -> CGRect {
+        let c = frame.center
+        let w = frame.width * scale
+        let h = frame.height * scale
+        return CGRect(x: c.x - w / 2.0, y: c.y - h / 2.0, width: w, height: h)
+    }
+
+    private func applyPhaseState(t: CGFloat) {
+        // t: 0...1
+        let phase1End: CGFloat = 0.3
+        let phase3Start: CGFloat = 0.7
+//        let maxScale: CGFloat = 1.25
+
+        let glassAlpha: CGFloat
+        let highlightAlpha: CGFloat
+//        let scale: CGFloat
+
+        if t <= phase1End {
+            let p = max(0.0, min(1.0, t / phase1End))
+            // scale up + crossfade
+//            scale = lerp(1.0, maxScale, easeOutCubic(p))
+            glassAlpha = p
+            highlightAlpha = 1.0 - p
+        } else if t < phase3Start {
+//            scale = maxScale
+            glassAlpha = 1.0
+            highlightAlpha = 0.0
+        } else {
+            let p = max(0.0, min(1.0, (t - phase3Start) / (1.0 - phase3Start)))
+            // scale down + crossfade обратно
+//            scale = lerp(maxScale, 1.0, easeInCubic(p))
+            glassAlpha = 1.0 - p
+            highlightAlpha = p
+        }
+
+        self.highlightCapsuleNode.alpha = highlightAlpha
+        self.glassNode.configuration.alpha = Float(glassAlpha) // если alpha CGFloat — убери Float(...)
+        
+        // scale применим в stepGlassMove, потому что там известен frame
+    }
+
 }
