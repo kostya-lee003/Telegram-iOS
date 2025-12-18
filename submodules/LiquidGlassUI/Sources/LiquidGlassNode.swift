@@ -41,7 +41,7 @@ public final class HidingWindowCaptureSource: LiquidGlassCaptureSource {
         let image = renderer.image { ctx in
             ctx.cgContext.translateBy(x: -rectInWindow.origin.x,
                                       y: -rectInWindow.origin.y)
-            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: afterScreenUpdates)
         }
 
         return image.cgImage
@@ -123,6 +123,12 @@ public final class LiquidGlassNode: ASDisplayNode {
     /// Источник снапшота (обычно UIWindow)
     public weak var captureSource: LiquidGlassCaptureSource?
     
+    /// Shared snapshot cache. Должен жить на уровне экрана/контроллера и шариться на все ноды.
+    public weak var snapshotEnvironment: LiquidGlassSnapshotEnvironment?
+
+    /// Margin вокруг rectInWindow, чтобы во время движения кроп всегда попадал в общий snapshot.
+    public var snapshotMargin: UIEdgeInsets = .init(top: 18, left: 44, bottom: 18, right: 44)
+    
     public var updateMode: UpdateMode = .idleOneShot
 
     private var pendingOneShot = false
@@ -147,8 +153,8 @@ public final class LiquidGlassNode: ASDisplayNode {
             view.clearColor = MTLClearColorMake(0, 0, 0, 0)
             view.framebufferOnly = false
 
-            view.enableSetNeedsDisplay = true   // ✅ было false :contentReference[oaicite:3]{index=3}
-            view.isPaused = true               // ✅ оставляем true
+            view.enableSetNeedsDisplay = true
+            view.isPaused = true
 
             self?.mtkView = view
             return view
@@ -172,16 +178,24 @@ public final class LiquidGlassNode: ASDisplayNode {
         guard displayLink == nil else { return }
         lastTick = 0
         let link = CADisplayLink(target: self, selector: #selector(tick))
+
+        if #available(iOS 15.0, *) {
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
+        } else {
+            link.preferredFramesPerSecond = 60
+        }
+//        if #available(iOS 15.0, *) {
+//            link.preferredFrameRateRange = CAFrameRateRange(minimum: 20, maximum: 40, preferred: 30)
+//        } else {
+//            link.preferredFramesPerSecond = 30
+//        }
+
         link.add(to: .main, forMode: .common)
         displayLink = link
     }
     
     public func start() {
-        guard displayLink == nil else { return }
-        lastTick = 0
-        let link = CADisplayLink(target: self, selector: #selector(tick))
-        link.add(to: .main, forMode: .common)
-        displayLink = link
+        ensureDisplayLink()
     }
 
     public func stop() {
@@ -191,32 +205,49 @@ public final class LiquidGlassNode: ASDisplayNode {
 
     @objc private func tick() {
         guard let mtkView, let renderer else { stop(); return }
-        guard let captureSource else { stop(); return }
         guard let window = view.window else { stop(); return }
 
         // если idle и нет запроса — сразу стоп
         let shouldRun = (updateMode == .continuous) || pendingOneShot
-        guard shouldRun else {
-            stop()
-            return
-        }
+        guard shouldRun else { stop(); return }
 
         let now = CACurrentMediaTime()
-        let minDelta = 1.0 / max(configuration.maxFPS, 1.0)
+
+        // В continuous строго 60fps, в idleOneShot можно оставить maxFPS (или тоже 60 — на твой вкус)
+        let targetFPS: Double = (updateMode == .continuous) ? 60.0 : Double(max(configuration.maxFPS, 1.0))
+        let minDelta = 1.0 / targetFPS
         if lastTick != 0, (now - lastTick) < minDelta { return }
         lastTick = now
 
         pendingOneShot = false
 
+        // rectInWindow берём по presentation() чтобы совпадало с анимацией
         let rectInWindow: CGRect
         if let pres = view.layer.presentation(), let superview = view.superview {
             rectInWindow = superview.convert(pres.frame, to: window)
         } else {
             rectInWindow = view.convert(view.bounds, to: window)
         }
+
         let scale = (window.screen.scale * configuration.downscale)
 
-        if let cgImage = captureSource.capture(rectInWindow: rectInWindow, scale: scale) {
+        var cgImage: CGImage?
+
+        if let env = snapshotEnvironment {
+            // если env не настроили captureSource — подхватим из ноды
+            if env.captureSource == nil { env.captureSource = captureSource }
+            cgImage = env.croppedImage(
+                for: rectInWindow,
+                scale: scale,
+                margin: snapshotMargin,
+                now: now
+            )
+        } else if let captureSource {
+            // fallback-режим (старый)
+            cgImage = captureSource.capture(rectInWindow: rectInWindow, scale: scale)
+        }
+
+        if let cgImage {
             renderer.updateBackground(cgImage: cgImage)
             mtkView.setNeedsDisplay()
         }
@@ -247,3 +278,278 @@ public final class LiquidGlassNode: ASDisplayNode {
 
 }
 
+
+
+
+
+// MARK: - LiquidGlassSnapshotEnvironment
+
+
+import UIKit
+
+/// Shared snapshot cache: capture a larger region редко, crop маленький region часто.
+public final class LiquidGlassSnapshotEnvironment {
+
+    // MARK: Debug
+    public var debugEnabled: Bool = true
+    private func dbgRecapture(_ reason: String, now: CFTimeInterval) {
+        guard debugEnabled else { return }
+        dbg.recaptureRequests += 1
+        dbg.reportIfNeeded(now: now)
+    }
+    private struct DebugStats {
+        var cropCalls: Int = 0
+
+        var recaptureRequests: Int = 0      // "нужно обновить snapshot"
+        var captureAttempts: Int = 0        // реально вызвали captureSource.capture(...)
+        var captureSuccess: Int = 0         // capture вернул CGImage
+        var captureFail: Int = 0            // capture вернул nil
+
+        // причины почему текущий snapshot не подошёл
+        var missNoSnapshot: Int = 0
+        var missScaleMismatch: Int = 0
+        var missOutsideRect: Int = 0
+        var missCropFailed: Int = 0
+
+        var lastReportTime: CFTimeInterval = CACurrentMediaTime()
+        var lastCaptureTime: CFTimeInterval = 0
+
+        mutating func reportIfNeeded(now: CFTimeInterval, prefix: String = "🧊Glass") {
+            let dt = now - lastReportTime
+            guard dt >= 1.0 else { return }
+
+            func r(_ v: Int) -> String { String(format: "%.2f", Double(v) / dt) }
+
+            print(
+                "\(prefix) crop/s=\(r(cropCalls)) " +
+                "recaptureReq/s=\(r(recaptureRequests)) " +
+                "capAttempt/s=\(r(captureAttempts)) " +
+                "capOk/s=\(r(captureSuccess)) capFail/s=\(r(captureFail)) " +
+                "miss{nil=\(missNoSnapshot),scale=\(missScaleMismatch),out=\(missOutsideRect),crop=\(missCropFailed)} " +
+                "lastCapAgo=\(String(format: "%.2f", now - lastCaptureTime))s"
+            )
+
+            cropCalls = 0
+            recaptureRequests = 0
+            captureAttempts = 0
+            captureSuccess = 0
+            captureFail = 0
+            missNoSnapshot = 0
+            missScaleMismatch = 0
+            missOutsideRect = 0
+            missCropFailed = 0
+            lastReportTime = now
+        }
+    }
+
+    private var dbg = DebugStats()
+    
+    public struct Snapshot {
+        public let cgImage: CGImage
+        public let rectInWindow: CGRect   // points
+        public let scale: CGFloat         // renderer scale used to create cgImage
+        public let timestamp: CFTimeInterval
+    }
+
+    // MARK: - Public настройки
+
+    /// Откуда берём картинку (обычно UIWindow через WindowCaptureSource / HidingWindowCaptureSource)
+    public weak var captureSource: LiquidGlassCaptureSource?
+
+    /// Лимит частоты обновления общего snapshot (кроп можно делать хоть 60fps)
+    public var maxSnapshotFPS: Double = 5.0
+
+    /// Запас вокруг области (в points), чтобы во время движения не выбегать за snapshot
+    public var defaultMargin: UIEdgeInsets = .init(top: 18, left: 44, bottom: 18, right: 44)
+
+    /// Текущий кеш
+    public private(set) var snapshot: Snapshot?
+
+    public init(captureSource: LiquidGlassCaptureSource? = nil) {
+        self.captureSource = captureSource
+    }
+
+    // MARK: - API
+
+    /// Прогреть snapshot под известную траекторию (например, union(fromFrame, toFrame) для анимации таба).
+    @discardableResult
+    public func prime(rectsInWindow: [CGRect], scale: CGFloat, margin: UIEdgeInsets? = nil) -> Bool {
+        precondition(Thread.isMainThread)
+        
+        guard let captureSource else { return false }
+        guard !rectsInWindow.isEmpty else { return false }
+
+        let m = margin ?? defaultMargin
+        let target = rectsInWindow
+            .reduce(rectsInWindow[0]) { $0.union($1) }
+            .insetBy(dx: 0, dy: 0)
+            .inset(by: UIEdgeInsets(top: -m.top, left: -m.left, bottom: -m.bottom, right: -m.right))
+
+        // MARK: Debug
+        let now = CACurrentMediaTime()
+        if debugEnabled {
+            dbg.recaptureRequests += 1
+            dbg.captureAttempts += 1
+            dbg.reportIfNeeded(now: now)
+        }
+
+        guard let img = captureSource.capture(rectInWindow: target, scale: scale) else {
+            if debugEnabled {
+                dbg.captureFail += 1
+                dbg.reportIfNeeded(now: now)
+            }
+            return false
+        }
+
+        if debugEnabled {
+            dbg.captureSuccess += 1
+            dbg.lastCaptureTime = now
+            dbg.reportIfNeeded(now: now)
+        }
+        
+        snapshot = Snapshot(cgImage: img, rectInWindow: target, scale: scale, timestamp: CACurrentMediaTime())
+        return true
+    }
+
+    /// Основной метод: вернуть кропнутый CGImage под текущий rect (в координатах UIWindow).
+    /// Если кеш не покрывает rect — пытаемся обновить общий snapshot (с rate-limit).
+    public func croppedImage(
+        for rectInWindow: CGRect,
+        scale: CGFloat,
+        margin: UIEdgeInsets? = nil,
+        now: CFTimeInterval = CACurrentMediaTime()
+    ) -> CGImage? {
+        precondition(Thread.isMainThread)
+        
+        // MARK: Debug
+        dbg.cropCalls += 1
+        dbg.reportIfNeeded(now: now)
+        
+        guard rectInWindow.width > 1, rectInWindow.height > 1 else { return nil }
+        guard let captureSource else { return nil }
+
+        let m = margin ?? defaultMargin
+        let neededExpanded = rectInWindow.inset(
+            by: UIEdgeInsets(top: -m.top, left: -m.left, bottom: -m.bottom, right: -m.right)
+        )
+
+        // MARK: Debug
+        if let s = snapshot {
+            if abs(s.scale - scale) >= 0.0001, debugEnabled {
+                dbg.missScaleMismatch += 1
+            } else if !s.rectInWindow.contains(rectInWindow), debugEnabled {
+                dbg.missOutsideRect += 1
+            } else if crop(snapshot: s, to: rectInWindow) == nil, debugEnabled {
+                dbg.missCropFailed += 1
+            }
+        } else {
+            if debugEnabled {
+                dbg.missNoSnapshot += 1
+                dbgRecapture("base=nil", now: now)
+            }
+        }
+
+        // 1) Если текущий snapshot подходит — просто кропаем.
+        if let s = snapshot,
+           abs(s.scale - scale) < 0.0001,
+           s.rectInWindow.contains(rectInWindow),
+           let cropped = crop(snapshot: s, to: rectInWindow) {
+            return cropped
+        }
+
+        // 2) Если snapshot не подходит — решаем, можно ли перефоткать общий snapshot (rate limit).
+        let shouldBypassRateLimit = (snapshot == nil) // первый снимок — всегда делаем
+        if shouldBypassRateLimit || canRefreshSnapshot(now: now) {
+            // Если уже был snapshot — лучше брать union(старый, новый expanded), чтобы меньше "дёргаться" по краям.
+            // MARK: Debug
+            if debugEnabled {
+                dbg.recaptureRequests += 1
+                // НЕ captureAttempts здесь
+                dbg.reportIfNeeded(now: now)
+            }
+            
+            let captureRect: CGRect
+            if let s = snapshot, abs(s.scale - scale) < 0.0001 {
+                captureRect = s.rectInWindow.union(neededExpanded)
+            } else {
+                captureRect = neededExpanded
+            }
+
+            if debugEnabled { dbg.captureAttempts += 1 }
+
+            if let img = captureSource.capture(rectInWindow: captureRect, scale: scale) {
+                snapshot = Snapshot(cgImage: img, rectInWindow: captureRect, scale: scale, timestamp: now)
+                if debugEnabled {
+                    dbg.captureSuccess += 1
+                    dbg.lastCaptureTime = now
+                    dbg.reportIfNeeded(now: now)
+                }
+            } else {
+                if debugEnabled {
+                    dbg.captureFail += 1
+                    dbg.reportIfNeeded(now: now)
+                }
+            }
+        }
+
+        // 3) После попытки обновления — снова пробуем отдать кроп.
+        if let s = snapshot,
+           abs(s.scale - scale) < 0.0001,
+           s.rectInWindow.contains(rectInWindow),
+           let cropped = crop(snapshot: s, to: rectInWindow) {
+            return cropped
+        }
+
+        // 4) Если не покрыли (слишком маленький margin или rate-limit не дал обновиться) — ничего не отдаём.
+        return nil
+    }
+
+    // MARK: - Internal
+
+    private func canRefreshSnapshot(now: CFTimeInterval) -> Bool {
+        guard maxSnapshotFPS > 0 else { return true }
+        guard let s = snapshot else { return true }
+        let minDelta = 1.0 / maxSnapshotFPS
+        return (now - s.timestamp) >= minDelta
+    }
+
+    private func crop(snapshot s: Snapshot, to rectInWindow: CGRect) -> CGImage? {
+        // rectInWindow (points) -> local rect inside snapshot (points)
+        let local = CGRect(
+            x: rectInWindow.origin.x - s.rectInWindow.origin.x,
+            y: rectInWindow.origin.y - s.rectInWindow.origin.y,
+            width: rectInWindow.size.width,
+            height: rectInWindow.size.height
+        )
+
+        // points -> pixels
+        var px = CGRect(
+            x: local.origin.x * s.scale,
+            y: local.origin.y * s.scale,
+            width: local.size.width * s.scale,
+            height: local.size.height * s.scale
+        ).integral
+
+        // clamp в границы изображения (на всякий)
+        let maxW = CGFloat(s.cgImage.width)
+        let maxH = CGFloat(s.cgImage.height)
+        if px.origin.x < 0 { px.origin.x = 0 }
+        if px.origin.y < 0 { px.origin.y = 0 }
+        if px.maxX > maxW { px.size.width = max(0, maxW - px.origin.x) }
+        if px.maxY > maxH { px.size.height = max(0, maxH - px.origin.y) }
+
+        guard px.width >= 1, px.height >= 1 else { return nil }
+        return s.cgImage.cropping(to: px)
+    }
+}
+
+private extension CGRect {
+    func inset(by insets: UIEdgeInsets) -> CGRect {
+        CGRect(
+            x: origin.x + insets.left,
+            y: origin.y + insets.top,
+            width: size.width - insets.left - insets.right,
+            height: size.height - insets.top - insets.bottom
+        )
+    }
+}

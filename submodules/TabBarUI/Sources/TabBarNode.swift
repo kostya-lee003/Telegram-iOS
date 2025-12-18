@@ -356,36 +356,10 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
                     let target = self.makeGlassFrame(for: selectedIndex, capsuleFrame: capsuleFrame)
                 else { return }
 
-                self.startGlassMove(to: target, fromX: fromX, duration: 1.0)
+                self.startGlassMove(to: target, fromX: fromX, duration: glassAnimDuration)
             }
         }
     }
-//    var selectedIndex: Int? {
-//        didSet {
-//            if self.selectedIndex != oldValue {
-//                if let oldValue = oldValue {
-//                    self.updateNodeImage(oldValue, layout: true)
-//                }
-//                
-//                if let selectedIndex = self.selectedIndex {
-//                    self.updateNodeImage(selectedIndex, layout: true)
-//                }
-//                
-//                if let capsuleFrame = self.lastCapsuleFrame {
-//                    self.glassNode.beginContinuousUpdates()
-//                    
-//                    self.updateGlassFrame(
-//                        capsuleFrame: capsuleFrame,
-//                        transition: .animated(duration: 0.25, curve: .easeInOut)
-//                    )
-//                    
-//                    Queue.mainQueue().after(0.25 + 0.05) { [weak self] in
-//                        self?.glassNode.endContinuousUpdates(finalOneShot: true)
-//                    }
-//                }
-//            }
-//        }
-//    }
     
     private let itemSelected: (Int, Bool, [ASDisplayNode]) -> Void
     private let contextAction: (Int, ContextExtractedContentContainingNode, ContextGesture) -> Void
@@ -420,6 +394,7 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
         return node
     }()
 
+    private var glassEnvironment: LiquidGlassSnapshotEnvironment?
     private var glassCaptureSource: LiquidGlassCaptureSource?
     private var lastCapsuleFrame: CGRect?
     
@@ -429,12 +404,12 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     private var glassMoveLink: CADisplayLink?
 
     private var glassAnimStartTime: CFTimeInterval = 0
-    private var glassAnimDuration: Double = 1.0
+    private var glassAnimDuration: Double = 0.5
 
     private var glassAnimFromX: CGFloat = 0
     private var glassAnimToX: CGFloat = 0
 
-    private var glassAnimBaseFrame: CGRect = .zero  // y/size фиксируем отсюда
+    private var glassAnimBaseFrame: CGRect = .zero
     
     private var tapRecognizer: TapLongTapOrDoubleTapGestureRecognizer?
     
@@ -492,18 +467,30 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     }
     
     private func ensureGlassCaptureSource() {
+        precondition(Thread.isMainThread)
+        
         if self.glassNode.captureSource != nil { return }
 
-        // форсим загрузку view (убираем зависимость от isNodeLoaded)
         let glassView = self.glassNode.view
-
         guard let window = self.view.window else { return }
 
         let source = HidingWindowCaptureSource(window: window, viewToHide: glassView)
-        self.glassCaptureSource = source      // strong (важно, потому что в glassNode оно weak)
+        self.glassCaptureSource = source
         self.glassNode.captureSource = source
+
+        if self.glassEnvironment == nil {
+            let env = LiquidGlassSnapshotEnvironment()
+            env.captureSource = source
+            env.maxSnapshotFPS = 5
+//            env.downscale = self.glassNode.configuration.downscale
+            self.glassEnvironment = env
+        } else {
+            self.glassEnvironment?.captureSource = source
+        }
+
+        self.glassNode.snapshotEnvironment = self.glassEnvironment
     }
-    
+
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
         if otherGestureRecognizer is UIPanGestureRecognizer {
             return false
@@ -794,44 +781,6 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
             }
         }
     }
-    
-//    private func updateGlassFrame(capsuleFrame: CGRect, transition: ContainedViewLayoutTransition) {
-//        guard
-//            let selectedIndex = self.selectedIndex,
-//            selectedIndex >= 0,
-//            selectedIndex < self.tabBarNodeContainers.count
-//        else {
-//            self.glassNode.isHidden = true
-//            return
-//        }
-//
-//        let selectedNode = self.tabBarNodeContainers[selectedIndex].imageNode
-//        guard selectedNode.isUserInteractionEnabled else {
-//            self.glassNode.isHidden = true
-//            return
-//        }
-//
-//        let size = CGSize(width: 80.0, height: 60.0)
-//        let center = CGPoint(x: selectedNode.frame.midX, y: capsuleFrame.midY)
-//
-//        var frame = CGRect(
-//            x: center.x - size.width / 2.0,
-//            y: center.y - size.height / 2.0,
-//            width: size.width,
-//            height: size.height
-//        )
-//
-//        // clamp inside capsule horizontally
-//        let pad: CGFloat = 8.0
-//        frame.origin.x = min(max(frame.origin.x, capsuleFrame.minX + pad), capsuleFrame.maxX - pad - frame.width)
-//        frame.origin.y = capsuleFrame.minY + (capsuleFrame.height - frame.height) / 2.0
-//
-//        self.glassNode.shape = .roundedRect(cornerRadius: frame.height / 2.0)
-//        self.glassNode.isHidden = false
-//        transition.updateFrame(node: self.glassNode, frame: frame)
-//        
-//        
-//    }
 
     func updateLayout(
         size: CGSize,
@@ -1109,7 +1058,6 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
 // MARK: Glass Animation Helpers
 extension TabBarNode {
     private func easeOutCubic(_ t: CGFloat) -> CGFloat {
-        // быстрый старт -> замедление к концу
         return 1.0 - pow(1.0 - t, 3.0)
     }
 
@@ -1154,33 +1102,43 @@ extension TabBarNode {
         self.glassNode.endContinuousUpdates(finalOneShot: true)
     }
 
-    private func startGlassMove(to targetFrame: CGRect, fromX: CGFloat?, duration: Double = 1.0) {
+    private func startGlassMove(to targetFrame: CGRect, fromX: CGFloat?, duration: Double) {
         if self.glassMoveLink != nil {
             self.stopGlassMove(completed: false)
         }
 
-        self.isGlassAnimating = true
-        self.glassAnimDuration = max(0.01, duration)
-        self.glassAnimStartTime = CACurrentMediaTime()
+        let margin = UIEdgeInsets(top: 16, left: 10, bottom: 16, right: 10)
+        let currentX: CGFloat = fromX ?? (glassNode.isHidden ? targetFrame.origin.x : glassNode.frame.origin.x)
+        
+        if let window = self.view.window {
+            var fromFrame = targetFrame
+            fromFrame.origin.x = currentX
+            let toFrame = targetFrame
 
-        self.glassAnimBaseFrame = targetFrame
+            let fromInWindow = self.view.convert(fromFrame, to: window)
+            let toInWindow   = self.view.convert(toFrame,   to: window)
 
-        let currentX: CGFloat
-        if let fromX { currentX = fromX }
-        else { currentX = self.glassNode.isHidden ? targetFrame.origin.x : self.glassNode.frame.origin.x }
+            let scale = window.screen.scale * glassNode.configuration.downscale
+            glassEnvironment?.prime(rectsInWindow: [fromInWindow, toInWindow], scale: scale, margin: margin)
+        }
 
-        self.glassAnimFromX = currentX
-        self.glassAnimToX = targetFrame.origin.x
+        isGlassAnimating = true
+        glassAnimDuration = max(0.01, duration)
+        glassAnimStartTime = CACurrentMediaTime()
+
+        glassAnimBaseFrame = targetFrame
+        glassAnimFromX = currentX
+        glassAnimToX   = targetFrame.origin.x
 
         var startFrame = targetFrame
         startFrame.origin.x = currentX
-        self.applyGlassFrame(startFrame)
+        applyGlassFrame(startFrame)
 
-        self.glassNode.beginContinuousUpdates()
+        glassNode.beginContinuousUpdates()
 
         let link = CADisplayLink(target: self, selector: #selector(stepGlassMove))
         link.add(to: .main, forMode: .common)
-        self.glassMoveLink = link
+        glassMoveLink = link
     }
 
     @objc private func stepGlassMove() {
@@ -1199,5 +1157,4 @@ extension TabBarNode {
             self.stopGlassMove(completed: true)
         }
     }
-
 }
