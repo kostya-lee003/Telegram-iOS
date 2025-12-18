@@ -209,60 +209,6 @@ import UIKit
 
 /// Shared snapshot cache: capture a larger region редко, crop маленький region часто.
 public final class LiquidGlassSnapshotEnvironment {
-
-    // MARK: Debug
-    public var debugEnabled: Bool = true
-    private func dbgRecapture(_ reason: String, now: CFTimeInterval) {
-        guard debugEnabled else { return }
-        dbg.recaptureRequests += 1
-        dbg.reportIfNeeded(now: now)
-    }
-    private struct DebugStats {
-        var cropCalls: Int = 0
-
-        var recaptureRequests: Int = 0      // "нужно обновить snapshot"
-        var captureAttempts: Int = 0        // реально вызвали captureSource.capture(...)
-        var captureSuccess: Int = 0         // capture вернул CGImage
-        var captureFail: Int = 0            // capture вернул nil
-
-        // причины почему текущий snapshot не подошёл
-        var missNoSnapshot: Int = 0
-        var missScaleMismatch: Int = 0
-        var missOutsideRect: Int = 0
-        var missCropFailed: Int = 0
-
-        var lastReportTime: CFTimeInterval = CACurrentMediaTime()
-        var lastCaptureTime: CFTimeInterval = 0
-
-        mutating func reportIfNeeded(now: CFTimeInterval, prefix: String = "🧊Glass") {
-            let dt = now - lastReportTime
-            guard dt >= 1.0 else { return }
-
-            func r(_ v: Int) -> String { String(format: "%.2f", Double(v) / dt) }
-
-            print(
-                "\(prefix) crop/s=\(r(cropCalls)) " +
-                "recaptureReq/s=\(r(recaptureRequests)) " +
-                "capAttempt/s=\(r(captureAttempts)) " +
-                "capOk/s=\(r(captureSuccess)) capFail/s=\(r(captureFail)) " +
-                "miss{nil=\(missNoSnapshot),scale=\(missScaleMismatch),out=\(missOutsideRect),crop=\(missCropFailed)} " +
-                "lastCapAgo=\(String(format: "%.2f", now - lastCaptureTime))s"
-            )
-
-            cropCalls = 0
-            recaptureRequests = 0
-            captureAttempts = 0
-            captureSuccess = 0
-            captureFail = 0
-            missNoSnapshot = 0
-            missScaleMismatch = 0
-            missOutsideRect = 0
-            missCropFailed = 0
-            lastReportTime = now
-        }
-    }
-
-    private var dbg = DebugStats()
     
     public struct Snapshot {
         public let cgImage: CGImage
@@ -305,26 +251,8 @@ public final class LiquidGlassSnapshotEnvironment {
             .insetBy(dx: 0, dy: 0)
             .inset(by: UIEdgeInsets(top: -m.top, left: -m.left, bottom: -m.bottom, right: -m.right))
 
-        // MARK: Debug
-        let now = CACurrentMediaTime()
-        if debugEnabled {
-            dbg.recaptureRequests += 1
-            dbg.captureAttempts += 1
-            dbg.reportIfNeeded(now: now)
-        }
-
         guard let img = captureSource.capture(rectInWindow: target, scale: scale) else {
-            if debugEnabled {
-                dbg.captureFail += 1
-                dbg.reportIfNeeded(now: now)
-            }
             return false
-        }
-
-        if debugEnabled {
-            dbg.captureSuccess += 1
-            dbg.lastCaptureTime = now
-            dbg.reportIfNeeded(now: now)
         }
         
         snapshot = Snapshot(cgImage: img, rectInWindow: target, scale: scale, timestamp: CACurrentMediaTime())
@@ -341,10 +269,6 @@ public final class LiquidGlassSnapshotEnvironment {
     ) -> CGImage? {
         precondition(Thread.isMainThread)
         
-        // MARK: Debug
-        dbg.cropCalls += 1
-        dbg.reportIfNeeded(now: now)
-        
         guard rectInWindow.width > 1, rectInWindow.height > 1 else { return nil }
         guard let captureSource else { return nil }
 
@@ -352,22 +276,6 @@ public final class LiquidGlassSnapshotEnvironment {
         let neededExpanded = rectInWindow.inset(
             by: UIEdgeInsets(top: -m.top, left: -m.left, bottom: -m.bottom, right: -m.right)
         )
-
-        // MARK: Debug
-        if let s = snapshot {
-            if abs(s.scale - scale) >= 0.0001, debugEnabled {
-                dbg.missScaleMismatch += 1
-            } else if !s.rectInWindow.contains(rectInWindow), debugEnabled {
-                dbg.missOutsideRect += 1
-            } else if crop(snapshot: s, to: rectInWindow) == nil, debugEnabled {
-                dbg.missCropFailed += 1
-            }
-        } else {
-            if debugEnabled {
-                dbg.missNoSnapshot += 1
-                dbgRecapture("base=nil", now: now)
-            }
-        }
 
         // 1) Если текущий snapshot подходит — просто кропаем.
         if let s = snapshot,
@@ -381,12 +289,6 @@ public final class LiquidGlassSnapshotEnvironment {
         let shouldBypassRateLimit = (snapshot == nil) // первый снимок — всегда делаем
         if shouldBypassRateLimit || canRefreshSnapshot(now: now) {
             // Если уже был snapshot — лучше брать union(старый, новый expanded), чтобы меньше "дёргаться" по краям.
-            // MARK: Debug
-            if debugEnabled {
-                dbg.recaptureRequests += 1
-                // НЕ captureAttempts здесь
-                dbg.reportIfNeeded(now: now)
-            }
             
             let captureRect: CGRect
             if let s = snapshot, abs(s.scale - scale) < 0.0001 {
@@ -395,20 +297,8 @@ public final class LiquidGlassSnapshotEnvironment {
                 captureRect = neededExpanded
             }
 
-            if debugEnabled { dbg.captureAttempts += 1 }
-
             if let img = captureSource.capture(rectInWindow: captureRect, scale: scale) {
                 snapshot = Snapshot(cgImage: img, rectInWindow: captureRect, scale: scale, timestamp: now)
-                if debugEnabled {
-                    dbg.captureSuccess += 1
-                    dbg.lastCaptureTime = now
-                    dbg.reportIfNeeded(now: now)
-                }
-            } else {
-                if debugEnabled {
-                    dbg.captureFail += 1
-                    dbg.reportIfNeeded(now: now)
-                }
             }
         }
 

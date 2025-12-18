@@ -390,7 +390,7 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
 //        node.configuration.lightDir = .init(0.9, -0.35) // подсветка справа-сверху
         node.configuration.alpha = 1.0
 
-        node.shape = .roundedRect(cornerRadius: 30) // потом обновим под высоту
+        node.shape = .roundedRect(cornerRadius: 30)
         return node
     }()
 
@@ -400,11 +400,13 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     
     // MARK: - Glass animation (X only)
 
+    private var forcePrimeWorkItem: DispatchWorkItem?
+
     private var isGlassAnimating = false
     private var glassMoveLink: CADisplayLink?
 
     private var glassAnimStartTime: CFTimeInterval = 0
-    private var glassAnimDuration: Double = 1.5
+    private var glassAnimDuration: Double = 0.4
 
     private var glassAnimFromX: CGFloat = 0
     private var glassAnimToX: CGFloat = 0
@@ -482,7 +484,6 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
             let env = LiquidGlassSnapshotEnvironment()
             env.captureSource = source
             env.maxSnapshotFPS = 60
-//            env.downscale = self.glassNode.configuration.downscale
             self.glassEnvironment = env
         } else {
             self.glassEnvironment?.captureSource = source
@@ -1051,26 +1052,58 @@ extension TabBarNode {
         return 1.0 - pow(1.0 - t, 3.0)
     }
 
+//    private func makeGlassFrame(for index: Int, capsuleFrame: CGRect) -> CGRect? {
+//        guard index >= 0, index < self.tabBarNodeContainers.count else { return nil }
+//        let selectedNode = self.tabBarNodeContainers[index].imageNode
+//        guard selectedNode.isUserInteractionEnabled else { return nil }
+//
+//        let size = CGSize(width: 80.0, height: 60.0)
+//        let center = CGPoint(x: selectedNode.frame.midX, y: capsuleFrame.midY)
+//
+//        var frame = CGRect(
+//            x: center.x - size.width / 2.0,
+//            y: center.y - size.height / 2.0,
+//            width: size.width,
+//            height: size.height
+//        )
+//
+//        let pad: CGFloat = 8.0
+//        frame.origin.x = min(max(frame.origin.x, capsuleFrame.minX + pad), capsuleFrame.maxX - pad - frame.width)
+//        frame.origin.y = capsuleFrame.minY + (capsuleFrame.height - frame.height) / 2.0
+//        return frame
+//    }
     private func makeGlassFrame(for index: Int, capsuleFrame: CGRect) -> CGRect? {
         guard index >= 0, index < self.tabBarNodeContainers.count else { return nil }
         let selectedNode = self.tabBarNodeContainers[index].imageNode
         guard selectedNode.isUserInteractionEnabled else { return nil }
 
-        let size = CGSize(width: 80.0, height: 60.0)
-        let center = CGPoint(x: selectedNode.frame.midX, y: capsuleFrame.midY)
+        let extraV: CGFloat = 10.0
+        let height = capsuleFrame.height + extraV * 2.0
 
+        let sideInset: CGFloat = 16.0
+        let visibleTabsCount = max(
+            1,
+            self.tabBarNodeContainers.filter { $0.imageNode.isUserInteractionEnabled }.count
+        )
+        let width = max(1.0, (self.bounds.width - sideInset * 2.0) / CGFloat(visibleTabsCount))
+
+        let centerX = selectedNode.frame.midX
         var frame = CGRect(
-            x: center.x - size.width / 2.0,
-            y: center.y - size.height / 2.0,
-            width: size.width,
-            height: size.height
+            x: centerX - width / 2.0,
+            y: capsuleFrame.minY - extraV,
+            width: width,
+            height: height
         )
 
         let pad: CGFloat = 8.0
-        frame.origin.x = min(max(frame.origin.x, capsuleFrame.minX + pad), capsuleFrame.maxX - pad - frame.width)
-        frame.origin.y = capsuleFrame.minY + (capsuleFrame.height - frame.height) / 2.0
+        frame.origin.x = min(
+            max(frame.origin.x, capsuleFrame.minX + pad),
+            capsuleFrame.maxX - pad - frame.width
+        )
+
         return frame
     }
+
 
     private func applyGlassFrame(_ frame: CGRect) {
         self.glassNode.shape = .roundedRect(cornerRadius: frame.height / 2.0)
@@ -1137,6 +1170,37 @@ extension TabBarNode {
 
         link.add(to: .main, forMode: .common)
         glassMoveLink = link
+        
+        // Force update snapshot (Only critical for tab bar)
+        forceUpdateGlassSnapshot(targetFrame: targetFrame, currentX: currentX, margin: margin)
+    }
+    
+    // Force update snapshot (Only critical for tab bar)
+    private func forceUpdateGlassSnapshot(targetFrame: CGRect, currentX: CGFloat, margin: UIEdgeInsets) {
+        self.forcePrimeWorkItem?.cancel()
+
+        let startToken = self.glassAnimStartTime
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard self.isGlassAnimating else { return }
+            guard abs(self.glassAnimStartTime - startToken) < 0.0001 else { return }
+            guard let window = self.view.window else { return }
+
+            var fromFrame = targetFrame
+            fromFrame.origin.x = currentX
+            let toFrame = targetFrame
+
+            let fromInWindow = self.view.convert(fromFrame, to: window)
+            let toInWindow   = self.view.convert(toFrame,   to: window)
+
+            let scale = window.screen.scale * self.glassNode.configuration.downscale
+            self.glassEnvironment?.prime(rectsInWindow: [fromInWindow, toInWindow], scale: scale, margin: margin)
+
+            self.glassNode.renderCurrentFrame(now: CACurrentMediaTime())
+        }
+
+        self.forcePrimeWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
     }
 
     @objc private func stepGlassMove() {
