@@ -1126,12 +1126,17 @@ extension TabBarNode {
         let currentX: CGFloat = fromX ?? (glassNode.isHidden ? targetFrame.origin.x : glassNode.frame.origin.x)
         
         if let window = self.view.window {
+            let maxScale: CGFloat = 1.15
+
             var fromFrame = targetFrame
             fromFrame.origin.x = currentX
             let toFrame = targetFrame
 
-            let fromInWindow = self.view.convert(fromFrame, to: window)
-            let toInWindow   = self.view.convert(toFrame,   to: window)
+            let primeFrom = scaledAboutCenter(fromFrame, scale: maxScale)
+            let primeTo   = scaledAboutCenter(toFrame,   scale: maxScale)
+
+            let fromInWindow = self.view.convert(primeFrom, to: window)
+            let toInWindow   = self.view.convert(primeTo,   to: window)
 
             let scale = window.screen.scale * glassNode.configuration.downscale
             glassEnvironment?.prime(rectsInWindow: [fromInWindow, toInWindow], scale: scale, margin: margin)
@@ -1183,12 +1188,17 @@ extension TabBarNode {
             guard abs(self.glassAnimStartTime - startToken) < 0.0001 else { return }
             guard let window = self.view.window else { return }
 
+            let maxScale: CGFloat = 1.15
+
             var fromFrame = targetFrame
             fromFrame.origin.x = currentX
             let toFrame = targetFrame
 
-            let fromInWindow = self.view.convert(fromFrame, to: window)
-            let toInWindow   = self.view.convert(toFrame,   to: window)
+            let primeFrom = scaledAboutCenter(fromFrame, scale: maxScale)
+            let primeTo   = scaledAboutCenter(toFrame,   scale: maxScale)
+
+            let fromInWindow = self.view.convert(primeFrom, to: window)
+            let toInWindow   = self.view.convert(primeTo,   to: window)
 
             let scale = window.screen.scale * self.glassNode.configuration.downscale
             self.glassEnvironment?.prime(rectsInWindow: [fromInWindow, toInWindow], scale: scale, margin: margin)
@@ -1211,25 +1221,25 @@ extension TabBarNode {
         var base = self.glassAnimBaseFrame
         base.origin.x = x
 
-        self.applyPhaseState(t: t)
-
+        let maxScale: CGFloat = 1.15
         let phase1End: CGFloat = 0.3
         let phase3Start: CGFloat = 0.7
-        let maxScale: CGFloat = 1.25
 
         let scale: CGFloat
         if t <= phase1End {
-            let p = max(0.0, min(1.0, t / phase1End))
-            scale = lerp(1.0, maxScale, easeOutCubic(p))
+            let p = min(1.0, max(0.0, t / phase1End))
+            scale = 1.0 + (maxScale - 1.0) * easeOutCubic(p)
         } else if t < phase3Start {
             scale = maxScale
         } else {
-            let p = max(0.0, min(1.0, (t - phase3Start) / (1.0 - phase3Start)))
-            scale = lerp(maxScale, 1.0, easeInCubic(p))
+            let p = min(1.0, max(0.0, (t - phase3Start) / (1.0 - phase3Start)))
+            scale = maxScale + (1.0 - maxScale) * easeInCubic(p)
         }
 
         let frame = scaledAboutCenter(base, scale: scale)
+
         self.applyCapsuleFrame(frame)
+        self.applyPhaseState(t: t)
 
         if self.glassNode.configuration.alpha > 0.001 {
             self.glassNode.renderCurrentFrame(now: now)
