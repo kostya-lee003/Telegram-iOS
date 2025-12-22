@@ -99,6 +99,7 @@ public struct LiquidGlassConfiguration {
 //    public var lightDir: SIMD2<Float> = .init(-0.5, -0.8) // верх-лево
 
     public var alpha: Float = 1.0
+    public var brightnessBoost: Float = 0.0
 
     public init() {}
 }

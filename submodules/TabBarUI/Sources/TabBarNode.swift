@@ -419,6 +419,10 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     private var glassAnimToX: CGFloat = 0
 
     private var glassAnimBaseFrame: CGRect = .zero
+
+    // Glass Bounce & Liquid effect
+    private var glassAnimStretchAmplitude: CGFloat = 0.0     // 0..0.4 (доп. рост по Y)
+    private var glassAnimBrightnessAmplitude: CGFloat = 0.0  // 0..0.2 (пик яркости)
     
     private var tapRecognizer: TapLongTapOrDoubleTapGestureRecognizer?
     
@@ -1108,6 +1112,11 @@ extension TabBarNode {
         self.glassMoveLink = nil
         self.isGlassAnimating = false
 
+        // сбрасываем liquid-состояние
+        self.glassAnimStretchAmplitude = 0.0
+        self.glassAnimBrightnessAmplitude = 0.0
+        self.glassNode.configuration.brightnessBoost = 0.0
+
         if completed {
             var finalBase = self.glassAnimBaseFrame
             finalBase.origin.x = self.glassAnimToX
@@ -1149,6 +1158,23 @@ extension TabBarNode {
         glassAnimBaseFrame = targetFrame
         glassAnimFromX = currentX
         glassAnimToX   = targetFrame.origin.x
+        
+        // --- Liquid amplitude from velocity ---
+
+        let travel = abs(glassAnimToX - glassAnimFromX)          // сколько по X проезжаем
+        let v = travel / CGFloat(glassAnimDuration)              // "скорость" в pt / s
+        let referenceV = targetFrame.width / 0.25                // «быстрый свайп» — один таб за 0.25s
+
+        let normalizedV = min(1.0, max(0.0, v / referenceV))
+
+        let maxStretch: CGFloat = 0.60    // +60% к высоте при очень быстрой анимации
+        let maxBrightness: CGFloat = 0.40 // +40% яркости максимум
+
+        glassAnimStretchAmplitude = maxStretch * normalizedV
+        glassAnimBrightnessAmplitude = maxBrightness * normalizedV
+
+        // на старте никаких лишних бликов
+        glassNode.configuration.brightnessBoost = 0.0
 
         self.highlightCapsuleNode.alpha = 1.0
         self.glassNode.configuration.alpha = 0.0
@@ -1221,25 +1247,16 @@ extension TabBarNode {
         var base = self.glassAnimBaseFrame
         base.origin.x = x
 
-        let maxScale: CGFloat = 1.15
-        let phase1End: CGFloat = 0.3
-        let phase3Start: CGFloat = 0.7
-
-        let scale: CGFloat
-        if t <= phase1End {
-            let p = min(1.0, max(0.0, t / phase1End))
-            scale = 1.0 + (maxScale - 1.0) * easeOutCubic(p)
-        } else if t < phase3Start {
-            scale = maxScale
-        } else {
-            let p = min(1.0, max(0.0, (t - phase3Start) / (1.0 - phase3Start)))
-            scale = maxScale + (1.0 - maxScale) * easeInCubic(p)
-        }
-
-        let frame = scaledAboutCenter(base, scale: scale)
+        // --- Liquid shape ---
+        let stretchY = liquidStretch(at: t)       // 1.0 .. 1.0 + A
+        let frame = scaledAboutCenter(base, scaleX: 1.0, scaleY: stretchY)
 
         self.applyCapsuleFrame(frame)
         self.applyPhaseState(t: t)
+
+        // --- Liquid brightness ---
+        let brightness = liquidBrightness(at: t)  // 0..0.2
+        self.glassNode.configuration.brightnessBoost = Float(brightness)
 
         if self.glassNode.configuration.alpha > 0.001 {
             self.glassNode.renderCurrentFrame(now: now)
@@ -1249,6 +1266,79 @@ extension TabBarNode {
             self.stopGlassMove(completed: true)
         }
     }
+
+//    @objc private func stepGlassMove() {
+//        let now = CACurrentMediaTime()
+//        let raw = (now - self.glassAnimStartTime) / self.glassAnimDuration
+//        let t = CGFloat(min(max(raw, 0.0), 1.0))
+//
+//        let eased = easeOutCubic(t)
+//        let x = self.glassAnimFromX + (self.glassAnimToX - self.glassAnimFromX) * eased
+//
+//        var base = self.glassAnimBaseFrame
+//        base.origin.x = x
+//
+//        let maxScale: CGFloat = 1.15
+//        let phase1End: CGFloat = 0.3
+//        let phase3Start: CGFloat = 0.7
+//
+//        let scale: CGFloat
+//        if t <= phase1End {
+//            let p = min(1.0, max(0.0, t / phase1End))
+//            scale = 1.0 + (maxScale - 1.0) * easeOutCubic(p)
+//        } else if t < phase3Start {
+//            scale = maxScale
+//        } else {
+//            let p = min(1.0, max(0.0, (t - phase3Start) / (1.0 - phase3Start)))
+//            scale = maxScale + (1.0 - maxScale) * easeInCubic(p)
+//        }
+//
+//        let frame = scaledAboutCenter(base, scale: scale)
+//
+//        self.applyCapsuleFrame(frame)
+//        self.applyPhaseState(t: t)
+//
+//        if self.glassNode.configuration.alpha > 0.001 {
+//            self.glassNode.renderCurrentFrame(now: now)
+//        }
+//
+//        if t >= 1.0 - 0.0001 {
+//            self.stopGlassMove(completed: true)
+//        }
+//    }
+    
+    private func bounceGlassOnTap() {
+        guard !isGlassAnimating else { return }
+
+        let baseFrame = glassAnimBaseFrame == .zero ? glassNode.frame : glassAnimBaseFrame
+
+        // короткая «анимация без движения»
+        glassAnimDuration = 0.3
+        glassAnimStartTime = CACurrentMediaTime()
+
+        glassAnimBaseFrame = baseFrame
+        glassAnimFromX = baseFrame.origin.x
+        glassAnimToX   = baseFrame.origin.x
+
+        glassAnimStretchAmplitude = 0.12
+        glassAnimBrightnessAmplitude = 0.12
+
+        let link = CADisplayLink(target: self, selector: #selector(stepGlassMove))
+
+        if #available(iOS 15.0, *) {
+            link.preferredFrameRateRange = CAFrameRateRange(
+                minimum: 50,
+                maximum: 60,
+                preferred: 60
+            )
+        } else {
+            link.preferredFramesPerSecond = 60
+        }
+
+        link.add(to: .main, forMode: .common)
+        glassMoveLink = link
+    }
+
 }
 
 // MARK: Animation helpers
@@ -1260,7 +1350,63 @@ private extension TabBarNode {
     private func easeInCubic(_ t: CGFloat) -> CGFloat {
         return t * t * t
     }
+    
+    private func liquidStretch(at t: CGFloat) -> CGFloat {
+        let A = glassAnimStretchAmplitude
+        if A <= 0.0001 { return 1.0 }
 
+        let phase1End: CGFloat = 0.25
+
+        if t <= phase1End {
+            let p = max(0.0, min(1.0, t / phase1End))
+            return 1.0 + A * easeOutCubic(p)
+        } else {
+            let tailT = max(0.0, min(1.0, (t - phase1End) / (1.0 - phase1End)))
+
+            let damping = exp(-0.1 * tailT)          // было 5.0 → стало 1.0
+            let oscillation = cos(2.0 * .pi * tailT) // было 12π → стало 4π
+
+            let offset = A * damping * oscillation
+
+            var value = 1.0 + offset
+            if t > 0.99 {
+                value = 1.0
+            }
+
+            let maxH: CGFloat = 1.0 + A
+            return min(maxH, max(1.0, value))
+        }
+    }
+
+    private func liquidBrightness(at t: CGFloat) -> CGFloat {
+        let A = glassAnimBrightnessAmplitude
+        if A <= 0.0001 { return 0.0 }
+
+        let stretch = liquidStretch(at: t)
+        let factor = glassAnimStretchAmplitude > 0
+            ? (stretch - 1.0) / glassAnimStretchAmplitude
+            : 0.0
+
+        let base = max(0.0, min(1.0, factor))
+
+        // было exp(-3 * t) → сделаем мягче
+        let tailDamping = exp(-1.2 * t)
+
+        return A * base * tailDamping
+    }
+
+    private func scaledAboutCenter(_ frame: CGRect, scaleX: CGFloat, scaleY: CGFloat) -> CGRect {
+        let c = frame.center
+        let w = frame.width * scaleX
+        let h = frame.height * scaleY
+        return CGRect(
+            x: c.x - w / 2.0,
+            y: c.y - h / 2.0,
+            width: w,
+            height: h
+        )
+    }
+    
     private func scaledAboutCenter(_ frame: CGRect, scale: CGFloat) -> CGRect {
         let c = frame.center
         let w = frame.width * scale

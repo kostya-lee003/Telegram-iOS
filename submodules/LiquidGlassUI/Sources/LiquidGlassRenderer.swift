@@ -31,9 +31,11 @@ private enum LiquidGlassShaderSource {
 
         float  alpha;
 
+        float  brightnessBoost;   // NEW 0..0.2
+
         uint   shapeType;
         float  cornerRadiusPx;
-        float3 _pad;
+        float2 _pad;
     };
 
     vertex VOut lg_vertex(const device float *v [[buffer(0)]], uint vid [[vertex_id]]) {
@@ -110,7 +112,10 @@ private enum LiquidGlassShaderSource {
         outCol.b = colB.b;
 
         // Slight milkiness/lightening INSIDE the lens
-        const float lift = 0.04; // 0.02..0.06 подбирай
+        float extraLift = clamp(u.brightnessBoost, 0.0, 0.20);
+        float lift = 0.04 + extraLift; // базовый + динамический
+        lift = clamp(lift, 0.0, 0.24); // не выходим за 24%
+
         outCol.rgb = mix(outCol.rgb, half3(1.0h), half(lift * inside));
 
         // Important: the basic "snapshot" is shown only inside the form
@@ -273,6 +278,7 @@ final class LiquidGlassRenderer: NSObject, MTKViewDelegate {
         u.rimStrength = configuration.rimStrength
 //        u.lightDir = simd_normalize(configuration.lightDir)
         u.alpha = configuration.alpha
+        u.brightnessBoost = configuration.brightnessBoost  // NEW
 
         switch shape {
         case .circle:
@@ -306,7 +312,7 @@ final class LiquidGlassRenderer: NSObject, MTKViewDelegate {
 // MARK: - Metal uniforms (must match .metal)
 
 struct Uniforms {
-    var size: SIMD2<Float> = .zero          // texture size in px
+    var size: SIMD2<Float> = .zero
     var center: SIMD2<Float> = .init(0.5, 0.5)
 
     var refraction: Float = 0
@@ -322,10 +328,14 @@ struct Uniforms {
 
     var alpha: Float = 1
 
+    /// 0..0.2 — extra lift к «молочности»
+    var brightnessBoost: Float = 0      // NEW
+
     // 0 circle, 1 roundedRect
     var shapeType: UInt32 = 0
     var cornerRadiusPx: Float = 0
 
-    // padding for alignment
-    var _pad: SIMD3<Float> = .zero
+    // padding для выравнивания с metal Uniforms
+    var _pad: SIMD2<Float> = .zero
 }
+
