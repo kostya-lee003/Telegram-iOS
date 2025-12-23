@@ -32,6 +32,10 @@ private enum LiquidGlassShaderSource {
         float  alpha;
 
         float  brightnessBoost;   // NEW 0..0.2
+        float  edgeBlurWidthPx;     // ширина ободка (в пикселях), = 10pt * scale
+        float  edgeBlurRadiusPx;    // “сила” размытия на самой границе (в пикселях)
+        float  edgeNoiseStrength;   // шум в ободке (0..~0.06)
+        float  edgeBlurMix;         // сколько подмешивать blur (0..1)
 
         uint   shapeType;
         float  cornerRadiusPx;
@@ -50,6 +54,12 @@ private enum LiquidGlassShaderSource {
     static inline float sdRoundedRect(float2 p, float2 halfSize, float r) {
         float2 q = abs(p) - halfSize + r;
         return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+    }
+    
+    static inline float hash21(float2 p) {
+        // быстрый псевдорандом 0..1
+        float h = dot(p, float2(127.1, 311.7));
+        return fract(sin(h) * 43758.5453123);
     }
 
     fragment half4 lg_fragment(
@@ -112,37 +122,40 @@ private enum LiquidGlassShaderSource {
         outCol.b = colB.b;
 
         // Slight milkiness/lightening INSIDE the lens
-        float extraLift = clamp(u.brightnessBoost, 0.0, 0.20);
+        float extraLift = clamp(u.brightnessBoost, 0.0, 0.10);
         float lift = 0.04 + extraLift; // базовый + динамический
-        lift = clamp(lift, 0.0, 0.24); // не выходим за 24%
+        lift = clamp(lift, 0.0, 0.14); // не выходим за 14%
+    
+        // ---- lens blur (UIVisualEffect-ish) ----
+        float nd = normalizedDist;                 // 0..1
+        float edge = edgeSharp;                    // уже есть
+        float blurK = inside * (0.20 + 0.80 * edge); // blur больше у края, но есть и в центре
 
-        outCol.rgb = mix(outCol.rgb, half3(1.0h), half(lift * inside));
+        // радиус blur в пикселях: 1..~8 (тюнится)
+        float blurPx = mix(1.2, 8.0, blurK);
+        float2 texel = (blurPx / u.size);
 
+        // 9 taps (крест + диагонали)
+        half3 s0 = bg.sample(s, uvG).rgb;
+        half3 s1 = bg.sample(s, uvG + texel * float2( 1, 0)).rgb;
+        half3 s2 = bg.sample(s, uvG + texel * float2(-1, 0)).rgb;
+        half3 s3 = bg.sample(s, uvG + texel * float2( 0, 1)).rgb;
+        half3 s4 = bg.sample(s, uvG + texel * float2( 0,-1)).rgb;
+        half3 s5 = bg.sample(s, uvG + texel * float2( 1, 1)).rgb;
+        half3 s6 = bg.sample(s, uvG + texel * float2(-1, 1)).rgb;
+        half3 s7 = bg.sample(s, uvG + texel * float2( 1,-1)).rgb;
+        half3 s8 = bg.sample(s, uvG + texel * float2(-1,-1)).rgb;
+
+        half3 blurred = (s0*2.0h + s1+s2+s3+s4 + s5+s6+s7+s8) / half(10.0);
+
+        // подмешиваем blur к текущему outCol
+        outCol.rgb = mix(outCol.rgb, blurred, half(blurK * 0.85));
+        
         // Important: the basic "snapshot" is shown only inside the form
-        outCol.rgb *= half(inside);
+        outCol.rgb *= inside;
 
         // Basic alpha is strictly based on the shape mask (clipping rounded corners)
-        outCol.a = half(inside * u.alpha);
-
-        // ============================================================
-        // Shadow ring (as you had it), but scaled to u.alpha
-        // ============================================================
-
-        float2 shadowCenter = c + float2(u.shadowOffset, u.shadowOffset);
-        float shadowDist = length(p - shadowCenter);
-
-        float radiusApprox = radiusForFalloff;
-        float shadowRadius = radiusApprox + u.shadowBlur;
-        bool inShadowRing = (shadowDist < shadowRadius) && (dist > 0.0);
-
-        if (inShadowRing) {
-            float t = (shadowDist - radiusApprox) / max(u.shadowBlur, 1.0);
-            float strength = smoothstep(1.0, 0.0, t) * u.shadowStrength * u.alpha;
-
-            // black "haze" around
-            outCol.rgb = mix(outCol.rgb, half3(0.0h), half(strength));
-            outCol.a = max(outCol.a, half(strength));
-        }
+        outCol.a = half(inside * u.alpha);        
 
         // ============================================================
         // Symmetrical rim + border (without unilateral rimBias)
@@ -278,7 +291,14 @@ final class LiquidGlassRenderer: NSObject, MTKViewDelegate {
         u.rimStrength = configuration.rimStrength
 //        u.lightDir = simd_normalize(configuration.lightDir)
         u.alpha = configuration.alpha
-        u.brightnessBoost = configuration.brightnessBoost  // NEW
+        u.brightnessBoost = configuration.brightnessBoost
+        
+        let pxPerPt = max(Float(bg.width) / Float(mtkView.drawableSize.width), 1.0)
+
+        u.edgeBlurWidthPx   = 10.0 * pxPerPt
+        u.edgeBlurRadiusPx  = 8.0 * pxPerPt
+        u.edgeNoiseStrength = 0.035
+        u.edgeBlurMix       = 1.0
 
         switch shape {
         case .circle:
@@ -330,6 +350,11 @@ struct Uniforms {
 
     /// 0..0.2 — extra lift к «молочности»
     var brightnessBoost: Float = 0      // NEW
+    
+    var edgeBlurWidthPx: Float = 0
+    var edgeBlurRadiusPx: Float = 0
+    var edgeNoiseStrength: Float = 0
+    var edgeBlurMix: Float = 0
 
     // 0 circle, 1 roundedRect
     var shapeType: UInt32 = 0

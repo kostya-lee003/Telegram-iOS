@@ -453,14 +453,6 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     
     private var skipNextSelectedIndexAnimation = false
 
-//    private var glassSettleLink: CADisplayLink?
-//    private var glassSettleStartTime: CFTimeInterval = 0
-//    private var glassSettleDuration: Double = 0.55
-//    private var glassSettleFromX: CGFloat = 0
-//    private var glassSettleToX: CGFloat = 0
-//    private var glassSettleBaseFrame: CGRect = .zero
-//    private var glassSettleStretch0: CGFloat = 0
-//    private var glassSettleBrightness0: CGFloat = 0
     private var glassMotionPhase: GlassMotionPhase = .tapMove
 
     private var suppressNextSelectedIndexMove = false
@@ -1411,7 +1403,6 @@ extension TabBarNode {
 
         let baseFrame = glassAnimBaseFrame == .zero ? glassNode.frame : glassAnimBaseFrame
 
-        glassAnimDuration = 0.3
         glassAnimStartTime = CACurrentMediaTime()
 
         glassAnimBaseFrame = baseFrame
