@@ -356,7 +356,13 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
                     let target = self.makeGlassFrame(for: selectedIndex, capsuleFrame: capsuleFrame)
                 else { return }
 
-                self.startGlassMove(to: target, fromX: fromX, duration: glassAnimDuration)
+                if self.suppressNextSelectedIndexMove {
+                    self.suppressNextSelectedIndexMove = false
+                    self.glassAnimBaseFrame = target
+                    return
+                }
+
+                self.startGlassMove(to: target, fromX: fromX)
             }
         }
     }
@@ -405,6 +411,11 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     private var glassCaptureSource: LiquidGlassCaptureSource?
     private var lastCapsuleFrame: CGRect?
     
+    private enum GlassMotionPhase {
+        case tapMove
+        case dragReleaseSettle
+    }
+    
     // MARK: - Glass animation (X only)
 
     private var forcePrimeWorkItem: DispatchWorkItem?
@@ -413,14 +424,50 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     private var glassMoveLink: CADisplayLink?
 
     private var glassAnimStartTime: CFTimeInterval = 0
-    private var glassAnimDuration: Double = 0.55
+    private var glassAnimDuration: Double = 0.65
 
     private var glassAnimFromX: CGFloat = 0
     private var glassAnimToX: CGFloat = 0
 
     private var glassAnimBaseFrame: CGRect = .zero
 
-    // Glass Bounce & Liquid effect
+    // MARK: - Glass drag
+
+    private var glassDragRecognizer: UIPanGestureRecognizer?
+    
+    private var glassDragStartPoint: CGPoint = .zero
+    private var isGlassDragArmed = false
+
+    private var isGlassDragging = false
+    private var glassDragLink: CADisplayLink?
+
+    private var glassDragBaseFrame: CGRect = .zero
+    private var glassDragTargetCenterX: CGFloat = 0
+    private var glassDragCurrentCenterX: CGFloat = 0
+
+    private var glassDragLastX: CGFloat = 0
+    private var glassDragLastTime: CFTimeInterval = 0
+    private var glassDragVelocityX: CGFloat = 0
+
+    private var suppressTapUntil: CFTimeInterval = 0
+    
+    private var skipNextSelectedIndexAnimation = false
+
+//    private var glassSettleLink: CADisplayLink?
+//    private var glassSettleStartTime: CFTimeInterval = 0
+//    private var glassSettleDuration: Double = 0.55
+//    private var glassSettleFromX: CGFloat = 0
+//    private var glassSettleToX: CGFloat = 0
+//    private var glassSettleBaseFrame: CGRect = .zero
+//    private var glassSettleStretch0: CGFloat = 0
+//    private var glassSettleBrightness0: CGFloat = 0
+    private var glassMotionPhase: GlassMotionPhase = .tapMove
+
+    private var suppressNextSelectedIndexMove = false
+
+    
+    // MARK: - Glass Bounce & Liquid effect
+    
     private var glassAnimStretchAmplitude: CGFloat = 0.0     // 0..0.4 (доп. рост по Y)
     private var glassAnimBrightnessAmplitude: CGFloat = 0.0  // 0..0.2 (пик яркости)
     
@@ -470,8 +517,10 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     override func didEnterHierarchy() {
         super.didEnterHierarchy()
         ensureGlassCaptureSource()
+        setupGlassDragGestureIfNeeded()
         glassNode.renderCurrentFrame()
     }
+
     
     override func didExitHierarchy() {
         super.didExitHierarchy()
@@ -511,9 +560,12 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     }
     
     @objc private func tapLongTapOrDoubleTapGesture(_ recognizer: TapLongTapOrDoubleTapGestureRecognizer) {
-        // Main gesture
         switch recognizer.state {
         case .ended:
+            let now = CACurrentMediaTime()
+            if self.isGlassDragging || now < self.suppressTapUntil {
+                return
+            }
             if let (gesture, location) = recognizer.lastRecognizedGestureAndLocation {
                 if case .tap = gesture {
                     self.tapped(at: location, longTap: false)
@@ -1037,34 +1089,50 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
             if location.y > self.bounds.size.height - bottomInset {
                 return
             }
-            var closestNode: (Int, CGFloat)?
-            
-            for i in 0 ..< self.tabBarNodeContainers.count {
-                let node = self.tabBarNodeContainers[i].imageNode
-                if !node.isUserInteractionEnabled {
-                    continue
-                }
-                let distance = abs(location.x - node.position.x)
-                if let previousClosestNode = closestNode {
-                    if previousClosestNode.1 > distance {
-                        closestNode = (i, distance)
-                    }
-                } else {
-                    closestNode = (i, distance)
-                }
+
+            guard let index = self.nearestTabIndex(at: location) else { return }
+
+            if !longTap, index == self.selectedIndex {
+                self.bounceGlassOnTap()
+                return
             }
-            
-            if let closestNode = closestNode {
-                let container = self.tabBarNodeContainers[closestNode.0]
-                let previousSelectedIndex = self.selectedIndex
-                self.itemSelected(closestNode.0, longTap, [container.imageNode.imageNode, container.imageNode.textImageNode, container.badgeContainerNode])
-                if previousSelectedIndex != closestNode.0 {
-                    if let selectedIndex = self.selectedIndex, let _ = self.tabBarItems[selectedIndex].item.animationName {
-                        container.imageNode.animationNode.play(firstFrame: false, fromIndex: nil)
-                    }
+
+            let previousSelectedIndex = self.selectedIndex
+            self.itemSelected(index, longTap, self.sourceNodesForItemSelected(at: index))
+
+            if previousSelectedIndex != index {
+                let container = self.tabBarNodeContainers[index]
+                if let selectedIndex = self.selectedIndex, let _ = self.tabBarItems[selectedIndex].item.animationName {
+                    container.imageNode.animationNode.play(firstFrame: false, fromIndex: nil)
                 }
             }
         }
+    }
+    
+    // Finds nearest enabled tab index for a given location.
+    // Used by tap and drag-release to share identical logic.
+    private func nearestTabIndex(at location: CGPoint) -> Int? {
+        var closest: (Int, CGFloat)?
+
+        for i in 0 ..< self.tabBarNodeContainers.count {
+            let node = self.tabBarNodeContainers[i].imageNode
+            if !node.isUserInteractionEnabled { continue }
+
+            let d = abs(location.x - node.position.x)
+            if let current = closest {
+                if d < current.1 { closest = (i, d) }
+            } else {
+                closest = (i, d)
+            }
+        }
+        return closest?.0
+    }
+
+    // Builds source nodes list for itemSelected callback.
+    // Keeps the same nodes order as existing tapped().
+    private func sourceNodesForItemSelected(at index: Int) -> [ASDisplayNode] {
+        let c = self.tabBarNodeContainers[index]
+        return [c.imageNode.imageNode, c.imageNode.textImageNode, c.badgeContainerNode]
     }
 }
 
@@ -1126,7 +1194,7 @@ extension TabBarNode {
         }
     }
 
-    private func startGlassMove(to targetFrame: CGRect, fromX: CGFloat?, duration: Double) {
+    private func startGlassMove(to targetFrame: CGRect, fromX: CGFloat?) {
         if self.glassMoveLink != nil {
             self.stopGlassMove(completed: false)
         }
@@ -1152,14 +1220,13 @@ extension TabBarNode {
         }
 
         isGlassAnimating = true
-        glassAnimDuration = max(0.01, duration)
         glassAnimStartTime = CACurrentMediaTime()
 
         glassAnimBaseFrame = targetFrame
         glassAnimFromX = currentX
         glassAnimToX   = targetFrame.origin.x
         
-        // --- Liquid amplitude from velocity ---
+        // Liquid amplitude from velocity
 
         let travel = abs(glassAnimToX - glassAnimFromX)          // сколько по X проезжаем
         let v = travel / CGFloat(glassAnimDuration)              // "скорость" в pt / s
@@ -1203,6 +1270,68 @@ extension TabBarNode {
         forceUpdateGlassSnapshot(targetFrame: targetFrame, currentX: currentX, margin: margin)
     }
     
+    // Starts settle animation after drag release.
+    // Keeps glass visible first, then fades back to highlight while snapping to a tab.
+    private func startGlassReleaseSettle(
+        to targetFrame: CGRect,
+        fromX: CGFloat,
+        startStretchY: CGFloat,
+        startBrightness: CGFloat,
+        velocityX: CGFloat
+    ) {
+        if self.glassMoveLink != nil {
+            self.stopGlassMove(completed: false)
+        }
+
+        self.glassMotionPhase = .dragReleaseSettle
+
+        let toX = targetFrame.origin.x
+
+        self.isGlassAnimating = true
+        self.glassAnimStartTime = CACurrentMediaTime()
+
+        self.glassAnimBaseFrame = targetFrame
+        self.glassAnimFromX = fromX
+        self.glassAnimToX = toX
+
+        self.glassAnimStretchAmplitude = max(0.0, min(0.60, startStretchY - 1.0))
+        self.glassAnimBrightnessAmplitude = max(0.0, min(0.20, startBrightness))
+
+        // Keep glass visible immediately (release starts from "manual control" look).
+        self.highlightCapsuleNode.alpha = 0.0
+        self.glassNode.configuration.alpha = 1.0
+        self.glassNode.configuration.brightnessBoost = Float(self.glassAnimBrightnessAmplitude)
+
+        var fromBase = targetFrame
+        fromBase.origin.x = fromX
+        let fromFrame = scaledAboutCenter(fromBase, scaleX: 1.0, scaleY: 1.0 + self.glassAnimStretchAmplitude)
+        self.applyCapsuleFrame(fromFrame)
+
+        // Prime both ends to avoid crop misses during fast settle.
+        if let window = self.view.window {
+            let margin = UIEdgeInsets(top: 16, left: 10, bottom: 16, right: 10)
+            let maxScale: CGFloat = 1.25
+
+            let primeFrom = scaledAboutCenter(fromFrame, scale: maxScale)
+            let primeTo   = scaledAboutCenter(targetFrame, scale: maxScale)
+
+            let fromInWindow = self.view.convert(primeFrom, to: window)
+            let toInWindow   = self.view.convert(primeTo,   to: window)
+
+            let scale = window.screen.scale * self.glassNode.configuration.downscale
+            self.glassEnvironment?.prime(rectsInWindow: [fromInWindow, toInWindow], scale: scale, margin: margin)
+        }
+
+        let link = CADisplayLink(target: self, selector: #selector(stepGlassMove))
+        if #available(iOS 15.0, *) {
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 50, maximum: 60, preferred: 60)
+        } else {
+            link.preferredFramesPerSecond = 60
+        }
+        link.add(to: .main, forMode: .common)
+        self.glassMoveLink = link
+    }
+
     // Force update snapshot (Only critical for tab bar)
     private func forceUpdateGlassSnapshot(targetFrame: CGRect, currentX: CGFloat, margin: UIEdgeInsets) {
         self.forcePrimeWorkItem?.cancel()
@@ -1247,15 +1376,24 @@ extension TabBarNode {
         var base = self.glassAnimBaseFrame
         base.origin.x = x
 
-        // --- Liquid shape ---
-        let stretchY = liquidStretch(at: t)       // 1.0 .. 1.0 + A
+        let stretchY: CGFloat
+        let brightness: CGFloat
+
+        switch self.glassMotionPhase {
+        case .tapMove:
+            stretchY = liquidStretch(at: t)
+            brightness = liquidBrightness(at: t)
+            self.applyPhaseState(t: t)
+
+        case .dragReleaseSettle:
+            stretchY = releaseStretch(at: t)
+            brightness = releaseBrightness(at: t)
+            self.applyReleasePhaseState(t: t)
+        }
+
         let frame = scaledAboutCenter(base, scaleX: 1.0, scaleY: stretchY)
-
         self.applyCapsuleFrame(frame)
-        self.applyPhaseState(t: t)
 
-        // --- Liquid brightness ---
-        let brightness = liquidBrightness(at: t)  // 0..0.2
         self.glassNode.configuration.brightnessBoost = Float(brightness)
 
         if self.glassNode.configuration.alpha > 0.001 {
@@ -1264,55 +1402,15 @@ extension TabBarNode {
 
         if t >= 1.0 - 0.0001 {
             self.stopGlassMove(completed: true)
+            self.glassMotionPhase = .tapMove
         }
     }
-
-//    @objc private func stepGlassMove() {
-//        let now = CACurrentMediaTime()
-//        let raw = (now - self.glassAnimStartTime) / self.glassAnimDuration
-//        let t = CGFloat(min(max(raw, 0.0), 1.0))
-//
-//        let eased = easeOutCubic(t)
-//        let x = self.glassAnimFromX + (self.glassAnimToX - self.glassAnimFromX) * eased
-//
-//        var base = self.glassAnimBaseFrame
-//        base.origin.x = x
-//
-//        let maxScale: CGFloat = 1.15
-//        let phase1End: CGFloat = 0.3
-//        let phase3Start: CGFloat = 0.7
-//
-//        let scale: CGFloat
-//        if t <= phase1End {
-//            let p = min(1.0, max(0.0, t / phase1End))
-//            scale = 1.0 + (maxScale - 1.0) * easeOutCubic(p)
-//        } else if t < phase3Start {
-//            scale = maxScale
-//        } else {
-//            let p = min(1.0, max(0.0, (t - phase3Start) / (1.0 - phase3Start)))
-//            scale = maxScale + (1.0 - maxScale) * easeInCubic(p)
-//        }
-//
-//        let frame = scaledAboutCenter(base, scale: scale)
-//
-//        self.applyCapsuleFrame(frame)
-//        self.applyPhaseState(t: t)
-//
-//        if self.glassNode.configuration.alpha > 0.001 {
-//            self.glassNode.renderCurrentFrame(now: now)
-//        }
-//
-//        if t >= 1.0 - 0.0001 {
-//            self.stopGlassMove(completed: true)
-//        }
-//    }
     
     private func bounceGlassOnTap() {
         guard !isGlassAnimating else { return }
 
         let baseFrame = glassAnimBaseFrame == .zero ? glassNode.frame : glassAnimBaseFrame
 
-        // короткая «анимация без движения»
         glassAnimDuration = 0.3
         glassAnimStartTime = CACurrentMediaTime()
 
@@ -1341,7 +1439,7 @@ extension TabBarNode {
 
 }
 
-// MARK: Animation helpers
+// MARK: Glass animation helpers
 private extension TabBarNode {
     private func lerp(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat {
         return a + (b - a) * t
@@ -1363,8 +1461,8 @@ private extension TabBarNode {
         } else {
             let tailT = max(0.0, min(1.0, (t - phase1End) / (1.0 - phase1End)))
 
-            let damping = exp(-0.1 * tailT)          // было 5.0 → стало 1.0
-            let oscillation = cos(2.0 * .pi * tailT) // было 12π → стало 4π
+            let damping = exp(-0.1 * tailT)          // Можно регулировать 0.1 - 3.0
+            let oscillation = cos(2.0 * .pi * tailT) // Можно регулировать 2.0 - 8.0
 
             let offset = A * damping * oscillation
 
@@ -1393,6 +1491,56 @@ private extension TabBarNode {
         let tailDamping = exp(-1.2 * t)
 
         return A * base * tailDamping
+    }
+    
+    // Computes stretch for drag-release settle.
+    // Starts at max stretch and decays with oscillation.
+    private func releaseStretch(at t: CGFloat) -> CGFloat {
+        let A = self.glassAnimStretchAmplitude
+        if A <= 0.0001 { return 1.0 }
+
+        let damping = exp(-2.1 * t)
+        let oscillation = cos(2.0 * .pi * (2.2 * t)) // ~2 oscillations
+
+        var value = 1.0 + A * damping * oscillation
+        if t > 0.99 { value = 1.0 }
+
+        return min(1.0 + A, max(1.0, value))
+    }
+
+    // Computes brightness for drag-release settle.
+    // Starts near max brightness and decays as stretch settles.
+    private func releaseBrightness(at t: CGFloat) -> CGFloat {
+        let B = self.glassAnimBrightnessAmplitude
+        if B <= 0.0001 { return 0.0 }
+
+        let A = max(0.0001, self.glassAnimStretchAmplitude)
+        let stretch = releaseStretch(at: t)
+        let factor = min(1.0, abs(stretch - 1.0) / A)
+
+        let damping = exp(-1.6 * t)
+        return min(0.20, B * factor * damping)
+    }
+
+    // Controls crossfade for drag-release settle.
+    // Keeps glass visible, then fades back to highlight near the end.
+    private func applyReleasePhaseState(t: CGFloat) {
+        let fadeStart: CGFloat = 0.70
+
+        let glassAlpha: CGFloat
+        let highlightAlpha: CGFloat
+
+        if t < fadeStart {
+            glassAlpha = 1.0
+            highlightAlpha = 0.0
+        } else {
+            let p = max(0.0, min(1.0, (t - fadeStart) / (1.0 - fadeStart)))
+            glassAlpha = 1.0 - p
+            highlightAlpha = p
+        }
+
+        self.highlightCapsuleNode.alpha = highlightAlpha
+        self.glassNode.configuration.alpha = Float(glassAlpha)
     }
 
     private func scaledAboutCenter(_ frame: CGRect, scaleX: CGFloat, scaleY: CGFloat) -> CGRect {
@@ -1448,4 +1596,286 @@ private extension TabBarNode {
         // scale применим в stepGlassMove, потому что там известен frame
     }
 
+}
+
+// MARK: Glass Drag helpers
+extension TabBarNode: UIGestureRecognizerDelegate {
+    // Sets up pan-based drag for the glass.
+    // Drag starts only after finger moves beyond a threshold.
+    private func setupGlassDragGestureIfNeeded() {
+        guard self.glassDragRecognizer == nil else { return }
+
+        let gr = UIPanGestureRecognizer(target: self, action: #selector(handleGlassPan(_:)))
+        gr.maximumNumberOfTouches = 1
+        gr.cancelsTouchesInView = false
+        gr.delegate = self
+
+        self.view.addGestureRecognizer(gr)
+        self.glassDragRecognizer = gr
+    }
+    
+    // Arms drag only if gesture began on glass.
+    // Starts drag when movement exceeds 10pt.
+    @objc private func handleGlassPan(_ gr: UIPanGestureRecognizer) {
+        let location = gr.location(in: self.view)
+        let now = CACurrentMediaTime()
+
+        switch gr.state {
+        case .began:
+            self.isGlassDragArmed = self.glassNode.frame.insetBy(dx: -18, dy: -12).contains(location)
+            self.glassDragStartPoint = location
+
+            if self.isGlassDragArmed {
+                self.suppressTapUntil = now + 0.20
+            }
+
+        case .changed:
+            guard self.isGlassDragArmed else { return }
+
+            let dx = location.x - self.glassDragStartPoint.x
+            let dy = location.y - self.glassDragStartPoint.y
+            let dist = hypot(dx, dy)
+
+            if !self.isGlassDragging {
+                // If finger is mostly still, allow long-tap recognizer to win.
+                if dist <= 10.0 { return }
+
+                // Movement started -> drag wins, cancel long-tap recognizer.
+                self.tapRecognizer?.cancel()
+                beginGlassDrag(at: location, now: now)
+            } else {
+                updateGlassDrag(at: location, now: now)
+            }
+
+        case .ended:
+            self.isGlassDragArmed = false
+            if self.isGlassDragging {
+                endGlassDrag(at: location, now: now, cancelled: false)
+            }
+
+        case .cancelled, .failed:
+            self.isGlassDragArmed = false
+            if self.isGlassDragging {
+                endGlassDrag(at: location, now: now, cancelled: true)
+            }
+
+        default:
+            break
+        }
+    }
+
+    // Starts dragging if the press began on the current glass hit area.
+    // Interrupts running animation and primes snapshot for the whole corridor.
+    private func beginGlassDrag(at location: CGPoint, now: CFTimeInterval) {
+        guard let capsuleFrame = self.lastCapsuleFrame else { return }
+
+        let hit = self.glassNode.frame.insetBy(dx: -18, dy: -12)
+        guard hit.contains(location) else { return }
+        
+        self.tapRecognizer?.cancel()
+
+        self.suppressTapUntil = now + 0.25
+
+        if self.isGlassAnimating {
+            self.stopGlassMove(completed: false)
+        }
+
+        stopGlassDragLink()
+
+        self.isGlassDragging = true
+        
+        self.tapRecognizer?.cancel()
+        self.suppressTabItemContextGestures()
+
+        self.glassDragBaseFrame = (self.glassAnimBaseFrame == .zero) ? self.glassNode.frame : self.glassAnimBaseFrame
+        self.glassDragTargetCenterX = location.x
+        self.glassDragCurrentCenterX = location.x
+
+        self.glassDragLastX = location.x
+        self.glassDragLastTime = now
+        self.glassDragVelocityX = 0
+
+        primeSnapshotForDrag(capsuleFrame: capsuleFrame)
+
+        self.highlightCapsuleNode.alpha = 0.0
+        self.glassNode.configuration.alpha = 1.0
+
+        startGlassDragLink()
+    }
+
+    // Updates drag target and velocity; rendering is done on display-link.
+    // This keeps stable 60fps even if touch events jitter.
+    private func updateGlassDrag(at location: CGPoint, now: CFTimeInterval) {
+        guard self.isGlassDragging else { return }
+
+        let dt = max(0.0001, now - self.glassDragLastTime)
+        let dx = location.x - self.glassDragLastX
+        let v = dx / CGFloat(dt)
+
+        self.glassDragVelocityX = self.glassDragVelocityX * 0.80 + v * 0.20
+        self.glassDragTargetCenterX = location.x
+
+        self.glassDragLastX = location.x
+        self.glassDragLastTime = now
+    }
+
+    // Ends dragging and triggers tab selection only on release.
+    // Starts a settle animation that shrinks/fades while moving to the nearest tab.
+    private func endGlassDrag(at location: CGPoint, now: CFTimeInterval, cancelled: Bool) {
+        guard self.isGlassDragging else { return }
+        self.restoreTabItemContextGestures()
+
+        self.isGlassDragging = false
+        stopGlassDragLink()
+
+        if cancelled {
+            self.bounceGlassOnTap()
+            return
+        }
+
+        guard let capsuleFrame = self.lastCapsuleFrame else {
+            self.bounceGlassOnTap()
+            return
+        }
+
+        self.suppressTapUntil = now + 0.20
+
+        // Clamp release base frame to corridor.
+        var releaseBase = self.glassDragBaseFrame
+        let minX = capsuleFrame.minX
+        let maxX = capsuleFrame.maxX - releaseBase.width
+        let originX = location.x - releaseBase.width * 0.5
+        releaseBase.origin.x = min(max(originX, minX), maxX)
+
+        // Capture current "manual control" look to start settle from it.
+        let currentStretchY = max(1.0, min(1.6, self.glassNode.frame.height / max(1.0, releaseBase.height)))
+        let currentBrightness = CGFloat(self.glassNode.configuration.brightnessBoost)
+
+        self.glassAnimBaseFrame = releaseBase
+
+        // Compute nearest tab + its target frame (same logic as tap).
+        let targetIndex = self.nearestTabIndex(at: location) ?? (self.selectedIndex ?? 0)
+        guard let targetFrame = self.makeGlassFrame(for: targetIndex, capsuleFrame: capsuleFrame) else {
+            self.bounceGlassOnTap()
+            return
+        }
+
+        // Switch screen ONLY on release.
+        if targetIndex != self.selectedIndex {
+            self.suppressNextSelectedIndexMove = true
+            self.itemSelected(targetIndex, false, self.sourceNodesForItemSelected(at: targetIndex))
+        }
+
+        // Settle visuals + move X from release -> target.
+        self.startGlassReleaseSettle(
+            to: targetFrame,
+            fromX: releaseBase.origin.x,
+            startStretchY: currentStretchY,
+            startBrightness: currentBrightness,
+            velocityX: self.glassDragVelocityX
+        )
+    }
+    
+    // Disables tab-item context gestures while dragging glass.
+    // Prevents context overlay from appearing during pan/drag.
+    private func suppressTabItemContextGestures() {
+        for container in self.tabBarNodeContainers {
+            container.imageNode.containerNode.cancelGesture()
+            container.imageNode.containerNode.isGestureEnabled = false
+        }
+    }
+
+    // Restores tab-item context gestures after drag ends.
+    // Uses tabBarItems contextActionType as the source of truth.
+    private func restoreTabItemContextGestures() {
+        let count = min(self.tabBarItems.count, self.tabBarNodeContainers.count)
+        guard count > 0 else { return }
+
+        for i in 0 ..< count {
+            let enabled = self.tabBarItems[i].contextActionType != .none
+            self.tabBarNodeContainers[i].imageNode.containerNode.isGestureEnabled = enabled
+        }
+    }
+
+
+    // Starts 60fps loop for drag rendering.
+    // Uses common runloop mode to keep updates during interactions.
+    private func startGlassDragLink() {
+        let link = CADisplayLink(target: self, selector: #selector(stepGlassDrag))
+
+        if #available(iOS 15.0, *) {
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 50, maximum: 60, preferred: 60)
+        } else {
+            link.preferredFramesPerSecond = 60
+        }
+
+        link.add(to: .main, forMode: .common)
+        self.glassDragLink = link
+    }
+
+    // Stops drag display-link loop.
+    // Keeps glass at its last frame so animation can start from there.
+    private func stopGlassDragLink() {
+        self.glassDragLink?.invalidate()
+        self.glassDragLink = nil
+    }
+
+    // Renders glass during drag at 60fps: follow finger, clamp, and render snapshot.
+    // Brightness/height are near-max while the user controls the glass.
+    @objc private func stepGlassDrag() {
+        guard self.isGlassDragging, let capsuleFrame = self.lastCapsuleFrame else {
+            stopGlassDragLink()
+            return
+        }
+
+        let now = CACurrentMediaTime()
+
+        // Smooth follow to avoid jitter.
+        let follow: CGFloat = 0.35
+        self.glassDragCurrentCenterX += (self.glassDragTargetCenterX - self.glassDragCurrentCenterX) * follow
+
+        var base = self.glassDragBaseFrame
+
+        // Clamp inside capsule corridor.
+        let minX = capsuleFrame.minX
+        let maxX = capsuleFrame.maxX - base.width
+        let originX = self.glassDragCurrentCenterX - base.width * 0.5
+        base.origin.x = min(max(originX, minX), maxX)
+
+        self.glassDragBaseFrame = base
+        
+        // Near-max "manual control" physics.
+        let tabW = max(1.0, base.width)
+        let refV = tabW / 0.12
+        let normV = min(1.0, abs(self.glassDragVelocityX) / refV)
+
+        let stretchY: CGFloat = 1.33 + 0.17 * normV          // ~max height
+        let brightness: Float = min(0.20, 0.16 + 0.04 * Float(normV)) // ~max brightness (clamped)
+
+        let frame = scaledAboutCenter(base, scaleX: 1.0, scaleY: stretchY)
+
+        self.applyCapsuleFrame(frame)
+        self.highlightCapsuleNode.alpha = 0.0
+        self.glassNode.configuration.alpha = 1.0
+        self.glassNode.configuration.brightnessBoost = brightness
+
+        self.glassNode.renderCurrentFrame(now: now)
+    }
+
+    // Primes the shared snapshot for the full drag corridor.
+    // This prevents crop misses when user drags fast.
+    private func primeSnapshotForDrag(capsuleFrame: CGRect) {
+        guard let window = self.view.window else { return }
+
+        let margin = UIEdgeInsets(top: 16, left: 10, bottom: 16, right: 10)
+        let maxScale: CGFloat = 1.25
+
+        let primeRect = scaledAboutCenter(capsuleFrame, scale: maxScale)
+        let rectInWindow = self.view.convert(primeRect, to: window)
+
+        let scale = window.screen.scale * self.glassNode.configuration.downscale
+        self.glassEnvironment?.prime(rectsInWindow: [rectInWindow], scale: scale, margin: margin)
+
+        self.glassNode.renderCurrentFrame(now: CACurrentMediaTime())
+    }
 }
