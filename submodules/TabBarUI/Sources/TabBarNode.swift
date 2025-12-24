@@ -456,6 +456,19 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     private var glassMotionPhase: GlassMotionPhase = .tapMove
 
     private var suppressNextSelectedIndexMove = false
+    
+    private var pendingSwitchWorkItem: DispatchWorkItem?
+    private var pendingSwitchIndex: Int?
+    private var pendingSwitchIsLongTap: Bool = false
+
+    // Pan-session flag: начался ли этот pan прямо на стекле (а не “в любом месте таббара”)
+    private var glassDragStartedOnGlass: Bool = false
+
+    // опционально, если делаешь catch-up:
+    private var glassDragCatchUpUntil: CFTimeInterval = 0
+    
+    private var isPressHolding: Bool = false  // для long-press: держим стекло увеличенным, не даём уйти в дефолт
+
 
     
     // MARK: - Glass Bounce & Liquid effect
@@ -464,6 +477,8 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     private var glassAnimBrightnessAmplitude: CGFloat = 0.0  // 0..0.2 (пик яркости)
     
     private var tapRecognizer: TapLongTapOrDoubleTapGestureRecognizer?
+    private var touchDownPendingIndex: Int?
+    private var didStartGlassMoveOnTouchDown = false
     
     init(theme: TabBarControllerTheme, itemSelected: @escaping (Int, Bool, [ASDisplayNode]) -> Void, contextAction: @escaping (Int, ContextExtractedContentContainingNode, ContextGesture) -> Void, swipeAction: @escaping (Int, TabBarItemSwipeDirection) -> Void) {
         self.itemSelected = itemSelected
@@ -552,21 +567,122 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     }
     
     @objc private func tapLongTapOrDoubleTapGesture(_ recognizer: TapLongTapOrDoubleTapGestureRecognizer) {
+        let now = CACurrentMediaTime()
+
         switch recognizer.state {
+//        case .began:
+//            // touchDownInside: стартуем только анимацию стекла (без смены таба)
+//            if self.isGlassDragging || now < self.suppressTapUntil { return }
+//
+//            let location = recognizer.location(in: self.view)
+//
+//            guard let bottomInset = self.validLayout?.4 else { return }
+//            if location.y > self.bounds.size.height - bottomInset { return }
+//
+//            guard let capsuleFrame = self.lastCapsuleFrame else { return }
+//            guard let index = self.nearestTabIndex(at: location) else { return }
+//
+//            // если это текущий таб — ничего не делаем (bounce оставим на touchUp)
+//            guard index != self.selectedIndex else { return }
+//
+//            // запоминаем, что начали движение на touchDown
+//            self.touchDownPendingIndex = index
+//            self.didStartGlassMoveOnTouchDown = true
+//
+//            // старт движения (из текущего X, чтобы выглядело естественно)
+//            if let target = self.makeGlassFrame(for: index, capsuleFrame: capsuleFrame) {
+//                self.startGlassMove(to: target, fromX: self.glassNode.isHidden ? nil : self.glassNode.frame.origin.x)
+//            }
+
+        case .began:
+            self.isPressHolding = true
+            self.pendingSwitchIsLongTap = false
+
+            let location = recognizer.location(in: self.view)
+            guard let capsuleFrame = self.lastCapsuleFrame,
+                  let targetIndex = self.nearestTabIndex(at: location) else { return }
+            
+            guard let targetFrame = self.makeGlassFrame(
+                for: targetIndex,
+                capsuleFrame: capsuleFrame
+            ) else { return }
+
+            var fromX: CGFloat? = nil
+            if self.glassNode.isHidden {
+                if let selected = self.selectedIndex,
+                   let selFrame = self.makeGlassFrame(for: selected, capsuleFrame: capsuleFrame) {
+                    fromX = selFrame.origin.x
+                } else {
+                    fromX = nil
+                }
+            } else {
+                fromX = self.glassNode.frame.origin.x
+            }
+
+            self.startGlassMove(to: targetFrame, fromX: fromX)
+
+            if targetIndex != self.selectedIndex {
+                scheduleTabSwitch(index: targetIndex)
+            }
+
         case .ended:
-            let now = CACurrentMediaTime()
             if self.isGlassDragging || now < self.suppressTapUntil {
+                self.touchDownPendingIndex = nil
+                self.didStartGlassMoveOnTouchDown = false
                 return
             }
+
             if let (gesture, location) = recognizer.lastRecognizedGestureAndLocation {
                 if case .tap = gesture {
+
+                    // Если touchDown начался на одном табе, а отпустили на другом —
+                    // не гасим selectedIndex-анимацию (пусть didSet сделает корректно),
+                    // а “предстарт” отменяем.
+                    if let endIndex = self.nearestTabIndex(at: location),
+                       let pending = self.touchDownPendingIndex,
+                       self.didStartGlassMoveOnTouchDown,
+                       pending != endIndex
+                    {
+                        self.stopGlassMove(completed: false)
+                        self.didStartGlassMoveOnTouchDown = false
+                        self.touchDownPendingIndex = nil
+                    }
+
+                    // Если мы уже стартанули движение на touchDown к тому же табу,
+                    // то при смене selectedIndex НЕ запускаем движение второй раз.
+                    if let endIndex = self.nearestTabIndex(at: location),
+                       let pending = self.touchDownPendingIndex,
+                       self.didStartGlassMoveOnTouchDown,
+                       pending == endIndex
+                    {
+                        self.suppressNextSelectedIndexMove = true
+                    }
+
                     self.tapped(at: location, longTap: false)
+                } else {
+                    // не tap (например longTap) — откатываем “предстарт” (по желанию),
+                    // сейчас просто сбрасываем состояние
+                    print()
                 }
             }
+
+            self.touchDownPendingIndex = nil
+            self.didStartGlassMoveOnTouchDown = false
+            self.isPressHolding = false
+
+        case .cancelled, .failed:
+            // жест сорвался — просто сбрасываем
+            self.touchDownPendingIndex = nil
+            self.didStartGlassMoveOnTouchDown = false
+            self.isPressHolding = false
+            cancelPendingTabSwitch()
+
+
         default:
             break
         }
     }
+
     
     func updateTheme(_ theme: TabBarControllerTheme) {
         if self.theme !== theme {
@@ -629,8 +745,10 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
             }, updateSelectedImage: { [weak self] _ in
                 self?.updateNodeImage(i, layout: true)
             }, contextAction: { [weak self] node, gesture in
-                self?.tapRecognizer?.cancel()
-                self?.contextAction(i, node, gesture)
+                guard let self else { return }
+                self.tapRecognizer?.cancel()
+                self.handleTabContextActionWillBegin(index: i)
+                self.contextAction(i, node, gesture)
             }, swipeAction: { [weak self] direction in
                 self?.swipeAction(i, direction)
             })
@@ -817,6 +935,28 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
                 }
             }
         }
+    }
+    
+    private func handleTabContextActionWillBegin(index: Int) {
+        cancelPendingTabSwitch()
+
+        self.touchDownPendingIndex = nil
+        self.didStartGlassMoveOnTouchDown = false
+
+        self.isPressHolding = false
+        
+        guard let capsuleFrame = self.lastCapsuleFrame,
+              let frame = self.makeGlassFrame(for: index, capsuleFrame: capsuleFrame) else { return }
+
+        if self.isGlassAnimating {
+            self.stopGlassMove(completed: false)
+        }
+
+        self.glassAnimBaseFrame = frame
+        self.applyCapsuleFrame(frame)
+        self.highlightCapsuleNode.alpha = 1.0
+        self.glassNode.configuration.alpha = 0.0
+        self.glassNode.configuration.brightnessBoost = 0.0
     }
     
     private func updateNodeBadge(_ index: Int, value: String) {
@@ -1248,18 +1388,18 @@ extension TabBarNode {
         if #available(iOS 15.0, *) {
             link.preferredFrameRateRange = CAFrameRateRange(
                 minimum: 50,
-                maximum: 60,
-                preferred: 60
+                maximum: 100,
+                preferred: 80
             )
         } else {
-            link.preferredFramesPerSecond = 60
+            link.preferredFramesPerSecond = 80
         }
 
         link.add(to: .main, forMode: .common)
         glassMoveLink = link
         
         // Force update snapshot (Only critical for tab bar)
-        forceUpdateGlassSnapshot(targetFrame: targetFrame, currentX: currentX, margin: margin)
+//        forceUpdateGlassSnapshot(targetFrame: targetFrame, currentX: currentX, margin: margin)
     }
     
     // Starts settle animation after drag release.
@@ -1554,39 +1694,28 @@ private extension TabBarNode {
     }
 
     private func applyPhaseState(t: CGFloat) {
-        // t: 0...1
-        let phase1End: CGFloat = 0.3
-        let phase3Start: CGFloat = 0.7
-//        let maxScale: CGFloat = 1.3
+        let phase1End: CGFloat = 0.18
+        let phase3Start: CGFloat = 0.70
 
         let glassAlpha: CGFloat
         let highlightAlpha: CGFloat
-//        let scale: CGFloat
 
         if t <= phase1End {
             let p = max(0.0, min(1.0, t / phase1End))
-            // scale up + crossfade
-//            scale = lerp(1.0, maxScale, easeOutCubic(p))
             glassAlpha = p
             highlightAlpha = 1.0 - p
-        } else if t < phase3Start {
-//            scale = maxScale
+        } else if t < phase3Start || self.isPressHolding {
             glassAlpha = 1.0
             highlightAlpha = 0.0
         } else {
             let p = max(0.0, min(1.0, (t - phase3Start) / (1.0 - phase3Start)))
-            // scale down + crossfade обратно
-//            scale = lerp(maxScale, 1.0, easeInCubic(p))
             glassAlpha = 1.0 - p
             highlightAlpha = p
         }
 
         self.highlightCapsuleNode.alpha = highlightAlpha
-        self.glassNode.configuration.alpha = Float(glassAlpha) // если alpha CGFloat — убери Float(...)
-        
-        // scale применим в stepGlassMove, потому что там известен frame
+        self.glassNode.configuration.alpha = Float(glassAlpha)
     }
-
 }
 
 // MARK: Glass Drag helpers
@@ -1613,7 +1742,18 @@ extension TabBarNode: UIGestureRecognizerDelegate {
 
         switch gr.state {
         case .began:
-            self.isGlassDragArmed = self.glassNode.frame.insetBy(dx: -18, dy: -12).contains(location)
+            guard let capsuleFrame = self.lastCapsuleFrame else {
+                self.isGlassDragArmed = false
+                self.glassDragStartedOnGlass = false
+                return
+            }
+
+            let corridorHit = capsuleFrame.insetBy(dx: 0, dy: -18).contains(location)
+            self.isGlassDragArmed = corridorHit
+            self.glassDragStartPoint = location
+
+            self.glassDragStartedOnGlass = self.glassNode.frame.insetBy(dx: -18, dy: -12).contains(location)
+            
             self.glassDragStartPoint = location
 
             if self.isGlassDragArmed {
@@ -1633,19 +1773,36 @@ extension TabBarNode: UIGestureRecognizerDelegate {
 
                 // Movement started -> drag wins, cancel long-tap recognizer.
                 self.tapRecognizer?.cancel()
-                beginGlassDrag(at: location, now: now)
+                beginGlassDrag(
+                    at: location,
+                    now: now,
+                    startedOnGlass: self.glassDragStartedOnGlass
+                )
             } else {
+                cancelPendingTabSwitch()
+
+//                beginGlassDrag(
+//                    at: location,
+//                    now: now,
+//                    startedOnGlass: self.glassDragStartedOnGlass
+//                )
+                
                 updateGlassDrag(at: location, now: now)
             }
 
         case .ended:
             self.isGlassDragArmed = false
+            self.glassDragStartedOnGlass = false
+            self.glassDragCatchUpUntil = 0
             if self.isGlassDragging {
                 endGlassDrag(at: location, now: now, cancelled: false)
             }
 
         case .cancelled, .failed:
             self.isGlassDragArmed = false
+            self.glassDragStartedOnGlass = false
+            self.glassDragCatchUpUntil = 0
+
             if self.isGlassDragging {
                 endGlassDrag(at: location, now: now, cancelled: true)
             }
@@ -1657,12 +1814,9 @@ extension TabBarNode: UIGestureRecognizerDelegate {
 
     // Starts dragging if the press began on the current glass hit area.
     // Interrupts running animation and primes snapshot for the whole corridor.
-    private func beginGlassDrag(at location: CGPoint, now: CFTimeInterval) {
+    private func beginGlassDrag(at location: CGPoint, now: CFTimeInterval, startedOnGlass: Bool) {
         guard let capsuleFrame = self.lastCapsuleFrame else { return }
 
-        let hit = self.glassNode.frame.insetBy(dx: -18, dy: -12)
-        guard hit.contains(location) else { return }
-        
         self.tapRecognizer?.cancel()
 
         self.suppressTapUntil = now + 0.25
@@ -1673,14 +1827,20 @@ extension TabBarNode: UIGestureRecognizerDelegate {
 
         stopGlassDragLink()
 
+        self.suppressTabItemContextGestures()
+        self.glassDragBaseFrame = (self.glassAnimBaseFrame == .zero) ? self.glassNode.frame : self.glassAnimBaseFrame
+        self.isPressHolding = true // если ты используешь hold-логику
         self.isGlassDragging = true
         
-        self.tapRecognizer?.cancel()
-        self.suppressTabItemContextGestures()
-
-        self.glassDragBaseFrame = (self.glassAnimBaseFrame == .zero) ? self.glassNode.frame : self.glassAnimBaseFrame
         self.glassDragTargetCenterX = location.x
-        self.glassDragCurrentCenterX = location.x
+
+        if startedOnGlass {
+            self.glassDragCurrentCenterX = location.x
+            self.glassDragCatchUpUntil = 0
+        } else {
+            self.glassDragCurrentCenterX = self.glassNode.frame.midX
+            self.glassDragCatchUpUntil = now + 0.10
+        }
 
         self.glassDragLastX = location.x
         self.glassDragLastTime = now
@@ -1822,7 +1982,7 @@ extension TabBarNode: UIGestureRecognizerDelegate {
         let now = CACurrentMediaTime()
 
         // Smooth follow to avoid jitter.
-        let follow: CGFloat = 0.35
+        let follow: CGFloat = (now < self.glassDragCatchUpUntil) ? 0.90 : 0.35
         self.glassDragCurrentCenterX += (self.glassDragTargetCenterX - self.glassDragCurrentCenterX) * follow
 
         var base = self.glassDragBaseFrame
@@ -1869,4 +2029,33 @@ extension TabBarNode: UIGestureRecognizerDelegate {
 
         self.glassNode.renderCurrentFrame(now: CACurrentMediaTime())
     }
+    
+    private func cancelPendingTabSwitch() {
+        pendingSwitchWorkItem?.cancel()
+        pendingSwitchWorkItem = nil
+        pendingSwitchIndex = nil
+        pendingSwitchIsLongTap = false
+    }
+
+    private func scheduleTabSwitch(index: Int) {
+        cancelPendingTabSwitch()
+
+        pendingSwitchIndex = index
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard self.pendingSwitchIndex == index else { return }
+
+            // чтобы selectedIndex.didSet не запускал второй moveGlass (у тебя это уже учтено)
+            self.suppressNextSelectedIndexMove = true  // см. didSet :contentReference[oaicite:3]{index=3}
+            self.itemSelected(index, self.pendingSwitchIsLongTap, self.sourceNodesForItemSelected(at: index))
+
+            self.pendingSwitchWorkItem = nil
+            self.pendingSwitchIndex = nil
+            self.pendingSwitchIsLongTap = false
+        }
+
+        pendingSwitchWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + self.glassAnimDuration, execute: work)
+    }
+
 }
