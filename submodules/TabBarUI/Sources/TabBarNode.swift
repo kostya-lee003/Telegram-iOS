@@ -385,15 +385,6 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     let backgroundNode: NavigationBackgroundNode
     let separatorNode: ASDisplayNode
     private var tabBarNodeContainers: [TabBarNodeContainer] = []
-    
-    private let highlightCapsuleNode: ASDisplayNode = {
-        let node = ASDisplayNode()
-        node.isUserInteractionEnabled = false
-        node.backgroundColor = UIColor.blue.withAlphaComponent(0.1)
-        node.isOpaque = false
-        node.clipsToBounds = true
-        return node
-    }()
 
     private let glassNode: LiquidGlassNode = {
         let node = LiquidGlassNode()
@@ -835,11 +826,6 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
                 self.addSubnode(self.glassNode)
             }
         }
-        
-        if self.highlightCapsuleNode.supernode != nil {
-            self.highlightCapsuleNode.removeFromSupernode()
-        }
-        self.insertSubnode(self.highlightCapsuleNode, aboveSubnode: glassNode)
     }
     
     private func updateNodeImage(_ index: Int, layout: Bool) {
@@ -957,7 +943,6 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
 
         self.glassAnimBaseFrame = frame
         self.applyCapsuleFrame(frame)
-        self.highlightCapsuleNode.alpha = 1.0
         self.glassNode.configuration.alpha = 0.0
         self.glassNode.configuration.brightnessBoost = 0.0
     }
@@ -1211,7 +1196,6 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
                 self.glassAnimToX = target.origin.x
             } else {
                 self.applyCapsuleFrame(target)
-                self.highlightCapsuleNode.alpha = 1.0
                 self.glassNode.configuration.alpha = 0.0
             }
         }
@@ -1304,10 +1288,6 @@ extension TabBarNode {
         self.glassNode.isHidden = false
         self.glassNode.frame = frame
         self.glassNode.shape = .roundedRect(cornerRadius: frame.height / 2.0 + 20)
-
-        // highlight
-        self.highlightCapsuleNode.frame = frame
-        self.highlightCapsuleNode.cornerRadius = frame.height / 2.0
     }
     
     private func stopGlassMove(completed: Bool) {
@@ -1378,7 +1358,6 @@ extension TabBarNode {
         // на старте никаких лишних бликов
         glassNode.configuration.brightnessBoost = 0.0
 
-        self.highlightCapsuleNode.alpha = 1.0
         self.glassNode.configuration.alpha = 0.0
 
         var startFrame = targetFrame
@@ -1433,7 +1412,6 @@ extension TabBarNode {
         self.glassAnimBrightnessAmplitude = max(0.0, min(0.20, startBrightness))
 
         // Keep glass visible immediately (release starts from "manual control" look).
-        self.highlightCapsuleNode.alpha = 0.0
         self.glassNode.configuration.alpha = 1.0
         self.glassNode.configuration.brightnessBoost = Float(self.glassAnimBrightnessAmplitude)
 
@@ -1654,18 +1632,14 @@ private extension TabBarNode {
         let fadeStart: CGFloat = 0.70
 
         let glassAlpha: CGFloat
-        let highlightAlpha: CGFloat
 
         if t < fadeStart {
             glassAlpha = 1.0
-            highlightAlpha = 0.0
         } else {
             let p = max(0.0, min(1.0, (t - fadeStart) / (1.0 - fadeStart)))
             glassAlpha = 1.0 - p
-            highlightAlpha = p
         }
 
-        self.highlightCapsuleNode.alpha = highlightAlpha
         self.glassNode.configuration.alpha = Float(glassAlpha)
     }
 
@@ -1693,22 +1667,17 @@ private extension TabBarNode {
         let phase3Start: CGFloat = 0.70
 
         let glassAlpha: CGFloat
-        let highlightAlpha: CGFloat
 
         if t <= phase1End {
             let p = max(0.0, min(1.0, t / phase1End))
             glassAlpha = p
-            highlightAlpha = 1.0 - p
         } else if t < phase3Start || self.isPressHolding {
             glassAlpha = 1.0
-            highlightAlpha = 0.0
         } else {
             let p = max(0.0, min(1.0, (t - phase3Start) / (1.0 - phase3Start)))
             glassAlpha = 1.0 - p
-            highlightAlpha = p
         }
 
-        self.highlightCapsuleNode.alpha = highlightAlpha
         self.glassNode.configuration.alpha = Float(glassAlpha)
     }
 }
@@ -1837,7 +1806,6 @@ extension TabBarNode: UIGestureRecognizerDelegate {
 
         primeSnapshotForDrag(capsuleFrame: capsuleFrame)
 
-        self.highlightCapsuleNode.alpha = 0.0
         self.glassNode.configuration.alpha = 1.0
 
         startGlassDragLink()
@@ -1995,7 +1963,6 @@ extension TabBarNode: UIGestureRecognizerDelegate {
         let frame = scaledAboutCenter(base, scaleX: 1.0, scaleY: stretchY)
 
         self.applyCapsuleFrame(frame)
-        self.highlightCapsuleNode.alpha = 0.0
         self.glassNode.configuration.alpha = 1.0
         self.glassNode.configuration.brightnessBoost = brightness
 
