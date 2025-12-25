@@ -446,7 +446,10 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     private var glassDragLastTime: CFTimeInterval = 0
     private var glassDragVelocityX: CGFloat = 0
     
+    private var glassTapVelocityX: CGFloat = 0.0
     private var glassDragBoostStartTime: CFTimeInterval = 0
+    private var glassAnimStartUniform: CGFloat = 1.0
+    private var minUniformToReachTabSize: CGFloat { 1.0 / GlassSize.baseScale }
 
     private var suppressTapUntil: CFTimeInterval = 0
     
@@ -1209,13 +1212,11 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
 // MARK: Glass Animation Helpers
 extension TabBarNode {
     
-    @inline(__always)
     private func snapToPixels(_ v: CGFloat) -> CGFloat {
         let s = self.view.window?.screen.scale ?? UIScreen.main.scale
         return round(v * s) / s
     }
 
-    @inline(__always)
     private func snapRectToPixels(_ r: CGRect) -> CGRect {
         CGRect(
             x: snapToPixels(r.origin.x),
@@ -1225,23 +1226,19 @@ extension TabBarNode {
         )
     }
 
-    @inline(__always)
     private func clampDelta(_ d: CGFloat) -> CGFloat {
         min(GlassSize.deltaRange, max(-GlassSize.deltaRange, d))
     }
 
-    @inline(__always)
     private func scalesFromDelta(_ delta: CGFloat) -> (sx: CGFloat, sy: CGFloat) {
         let d = clampDelta(delta)
         return (GlassSize.baseScale - d, GlassSize.baseScale + d)
     }
 
-    @inline(__always)
     private func deltaFromScales(scaleX: CGFloat, scaleY: CGFloat) -> CGFloat {
         clampDelta((scaleY - scaleX) * 0.5)
     }
     
-    @inline(__always)
     private func easeOutBack(_ x: CGFloat, s: CGFloat = 2.2) -> CGFloat {
         let c1 = s
         let c3 = c1 + 1.0
@@ -1249,7 +1246,6 @@ extension TabBarNode {
         return 1.0 + c3 * t * t * t + c1 * t * t
     }
 
-    @inline(__always)
     private func releaseDelta(at t: CGFloat, startDelta: CGFloat) -> CGFloat {
         let t1 = GlassSize.settlePhase1End
         let d0 = startDelta
@@ -1264,6 +1260,47 @@ extension TabBarNode {
             let p = max(0.0, min(1.0, (t - t1) / (1.0 - t1)))
             let k = easeOutBack(p, s: 2.0)
             return clampDelta(d1 + (d2 - d1) * k)
+        }
+    }
+    
+    private func tapDelta(at t: CGFloat) -> CGFloat {
+        let screenW = self.view.bounds.width > 1 ? self.view.bounds.width : UIScreen.main.bounds.width
+        let vRef = GlassSize.referenceVelocity(screenWidth: screenW) * 1.4
+        let speedFactor = max(0.0, min(1.0, abs(self.glassTapVelocityX) / max(1.0, vRef)))
+
+        let midBump = sin(.pi * t)
+
+        let deltaTarget = GlassSize.deltaRange * speedFactor * midBump
+
+        let now = CACurrentMediaTime()
+        let wobbleAmp = GlassSize.dragWobbleAmpAtMaxSpeed * speedFactor * midBump
+        let wobble = sin(CGFloat(now) * 2.0 * .pi * GlassSize.dragWobbleFreqHz) * wobbleAmp
+
+        return clampDelta(deltaTarget + wobble)
+    }
+    
+    private func releaseUniform(at t: CGFloat, startUniform: CGFloat) -> CGFloat {
+        let t1 = GlassSize.settlePhase1End // 0.60
+        let uMin = minUniformToReachTabSize
+
+        if t <= t1 {
+            let p = max(0, min(1, t / t1))
+            return startUniform + (uMin - startUniform) * easeOutCubic(p)
+        } else {
+            let p = max(0, min(1, (t - t1) / (1 - t1)))
+            // “густое желе” можно back
+            return uMin + (1.0 - uMin) * easeOutBack(p, s: 2.0)
+        }
+    }
+
+    /// delta при отпускании: с текущего -> 0 (чтобы к моменту shrink был ровный 1.0/1.0)
+    private func releaseDeltaToZero(at t: CGFloat, startDelta: CGFloat) -> CGFloat {
+        let t1 = GlassSize.settlePhase1End
+        if t <= t1 {
+            let p = max(0, min(1, t / t1))
+            return clampDelta(startDelta * (1.0 - easeOutCubic(p)))
+        } else {
+            return 0.0
         }
     }
     
@@ -1355,6 +1392,9 @@ extension TabBarNode {
         glassAnimFromX = currentX
         glassAnimToX   = targetFrame.origin.x
 
+        let dx = abs(targetFrame.origin.x - currentX)
+        self.glassTapVelocityX = dx / CGFloat(max(0.001, self.glassAnimDuration))
+
         let maxStretch: CGFloat = 0.50    // +60% к высоте при очень быстрой анимации
         let maxBrightness: CGFloat = 0.30 // +40% яркости максимум
 
@@ -1393,10 +1433,11 @@ extension TabBarNode {
     
     // Starts settle animation after drag release.
     // Keeps glass visible first, then fades back to highlight while snapping to a tab.
-    private func startGlassReleaseSettle(
+    func startGlassReleaseSettle(
         to targetFrame: CGRect,
         fromX: CGFloat,
         startDelta: CGFloat,
+        startUniform: CGFloat,
         startBrightness: CGFloat,
         velocityX: CGFloat
     ) {
@@ -1503,8 +1544,8 @@ extension TabBarNode {
 
         switch self.glassMotionPhase {
         case .tapMove:
-            delta = 0.0
-            brightness = liquidBrightness(at: t)
+            delta = tapDelta(at: t)
+            brightness = CGFloat(0.08)
             self.applyPhaseState(t: t)
 
         case .dragReleaseSettle:
@@ -1864,13 +1905,6 @@ extension TabBarNode: UIGestureRecognizerDelegate {
         let originX = location.x - releaseBase.width * 0.5
         releaseBase.origin.x = min(max(originX, minX), maxX)
 
-        // Capture current "manual control" look to start settle from it.
-        let scaleY = self.glassNode.frame.height / max(1.0, releaseBase.height)
-        let scaleX = self.glassNode.frame.width  / max(1.0, releaseBase.width)
-        let startDelta = deltaFromScales(scaleX: scaleX, scaleY: scaleY)
-
-        let currentBrightness = CGFloat(self.glassNode.configuration.brightnessBoost)
-
         self.glassAnimBaseFrame = releaseBase
 
         // Compute nearest tab + its target frame (same logic as tap).
@@ -1879,6 +1913,13 @@ extension TabBarNode: UIGestureRecognizerDelegate {
             self.bounceGlassOnTap()
             return
         }
+        
+        let currentBase = targetFrame
+
+        let absScaleX = self.glassNode.frame.width  / max(1.0, currentBase.width)
+        let absScaleY = self.glassNode.frame.height / max(1.0, currentBase.height)
+
+        let startDelta = deltaFromScales(scaleX: absScaleX, scaleY: absScaleY)
 
         // Switch screen ONLY on release.
         if targetIndex != self.selectedIndex {
@@ -1886,11 +1927,19 @@ extension TabBarNode: UIGestureRecognizerDelegate {
             self.itemSelected(targetIndex, false, self.sourceNodesForItemSelected(at: targetIndex))
         }
 
+        let currentCenterX = self.glassNode.frame.midX
+
+        // startUniform: absScaleX ≈ (baseScale - delta) * uniform
+        let denom: CGFloat = max(0.001, (GlassSize.baseScale - startDelta))
+        let startUniform = max(minUniformToReachTabSize, min(1.5, absScaleX / denom))
+        let fromX = currentCenterX - currentBase.width * 0.5
+
         self.startGlassReleaseSettle(
             to: targetFrame,
-            fromX: releaseBase.origin.x,
+            fromX: fromX,
             startDelta: startDelta,
-            startBrightness: currentBrightness,
+            startUniform: startUniform,
+            startBrightness: CGFloat(self.glassNode.configuration.brightnessBoost),
             velocityX: self.glassDragVelocityX
         )
     }
