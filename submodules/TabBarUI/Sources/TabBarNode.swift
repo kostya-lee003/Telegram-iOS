@@ -329,41 +329,45 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     
     var selectedIndex: Int? {
         didSet {
-            if self.selectedIndex != oldValue {
-                guard self.selectedIndex != oldValue else { return }
-                guard let capsuleFrame = self.lastCapsuleFrame else { return }
+            guard selectedIndex != oldValue else { return }
 
-                // 1) вычисляем X старого таба (если был)
-                var fromX: CGFloat? = nil
-                if let old = oldValue,
-                   let oldFrame = self.makeGlassFrame(for: old, capsuleFrame: capsuleFrame) {
-                    fromX = oldFrame.origin.x
-                } else if !self.glassNode.isHidden {
-                    fromX = self.glassNode.frame.origin.x
-                }
-
-                // 2) обновляем иконки/лейаут
-                if let oldValue {
-                    self.updateNodeImage(oldValue, layout: true)
-                }
-                if let selectedIndex {
-                    self.updateNodeImage(selectedIndex, layout: true)
-                }
-
-                // 3) считаем target и стартуем движение
-                guard
-                    let selectedIndex = self.selectedIndex,
-                    let target = self.makeGlassFrame(for: selectedIndex, capsuleFrame: capsuleFrame)
-                else { return }
-
-                if self.suppressNextSelectedIndexMove {
-                    self.suppressNextSelectedIndexMove = false
-                    self.glassAnimBaseFrame = target
-                    return
-                }
-
-                self.startGlassMove(to: target, fromX: fromX)
+            if let old = oldValue {
+                updateNodeImage(old, layout: true)
             }
+            if let new = selectedIndex {
+                updateNodeImage(new, layout: true)
+            }
+
+            if suppressNextSelectedIndexMove {
+                suppressNextSelectedIndexMove = false
+                if let capsuleFrame = lastCapsuleFrame,
+                   let new = selectedIndex,
+                   let target = makeGlassFrame(for: new, capsuleFrame: capsuleFrame) {
+                    glassAnimBaseFrame = target
+                }
+                return
+            }
+
+            guard
+                let capsuleFrame = lastCapsuleFrame,
+                let new = selectedIndex,
+                let target = makeGlassFrame(for: new, capsuleFrame: capsuleFrame)
+            else {
+                return
+            }
+
+            let fromX: CGFloat? = {
+                if let old = oldValue,
+                   let oldFrame = makeGlassFrame(for: old, capsuleFrame: capsuleFrame) {
+                    return oldFrame.origin.x
+                }
+                if !glassNode.isHidden {
+                    return glassNode.frame.origin.x
+                }
+                return nil
+            }()
+
+            startGlassMove(to: target, fromX: fromX)
         }
     }
     
@@ -527,7 +531,6 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
         setupGlassDragGestureIfNeeded()
         glassNode.renderCurrentFrame()
     }
-
     
     override func didExitHierarchy() {
         super.didExitHierarchy()
@@ -1399,7 +1402,7 @@ extension TabBarNode {
         glassMoveLink = link
         
         // Force update snapshot (Only critical for tab bar)
-//        forceUpdateGlassSnapshot(targetFrame: targetFrame, currentX: currentX, margin: margin)
+        forceUpdateGlassSnapshot(targetFrame: targetFrame, currentX: currentX, margin: margin)
     }
     
     // Starts settle animation after drag release.
@@ -1567,18 +1570,10 @@ extension TabBarNode {
         link.add(to: .main, forMode: .common)
         glassMoveLink = link
     }
-
 }
 
 // MARK: Glass animation helpers
 private extension TabBarNode {
-    private func lerp(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat {
-        return a + (b - a) * t
-    }
-
-    private func easeInCubic(_ t: CGFloat) -> CGFloat {
-        return t * t * t
-    }
     
     private func liquidStretch(at t: CGFloat) -> CGFloat {
         let A = glassAnimStretchAmplitude
@@ -1780,12 +1775,6 @@ extension TabBarNode: UIGestureRecognizerDelegate {
                 )
             } else {
                 cancelPendingTabSwitch()
-
-//                beginGlassDrag(
-//                    at: location,
-//                    now: now,
-//                    startedOnGlass: self.glassDragStartedOnGlass
-//                )
                 
                 updateGlassDrag(at: location, now: now)
             }

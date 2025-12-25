@@ -96,7 +96,6 @@ public struct LiquidGlassConfiguration {
 
     public var rimThickness: Float = 1.5    // px
     public var rimStrength: Float = 0.9     // 0..1
-//    public var lightDir: SIMD2<Float> = .init(-0.5, -0.8) // верх-лево
 
     public var alpha: Float = 1.0
     public var brightnessBoost: Float = 0.0
@@ -278,7 +277,6 @@ public final class LiquidGlassSnapshotEnvironment {
             by: UIEdgeInsets(top: -m.top, left: -m.left, bottom: -m.bottom, right: -m.right)
         )
 
-        // 1) Если текущий snapshot подходит — просто кропаем.
         if let s = snapshot,
            abs(s.scale - scale) < 0.0001,
            s.rectInWindow.contains(rectInWindow),
@@ -286,10 +284,8 @@ public final class LiquidGlassSnapshotEnvironment {
             return cropped
         }
 
-        // 2) Если snapshot не подходит — решаем, можно ли перефоткать общий snapshot (rate limit).
         let shouldBypassRateLimit = (snapshot == nil) // первый снимок — всегда делаем
         if shouldBypassRateLimit || canRefreshSnapshot(now: now) {
-            // Если уже был snapshot — лучше брать union(старый, новый expanded), чтобы меньше "дёргаться" по краям.
             
             let captureRect: CGRect
             if let s = snapshot, abs(s.scale - scale) < 0.0001 {
@@ -303,7 +299,6 @@ public final class LiquidGlassSnapshotEnvironment {
             }
         }
 
-        // 3) После попытки обновления — снова пробуем отдать кроп.
         if let s = snapshot,
            abs(s.scale - scale) < 0.0001,
            s.rectInWindow.contains(rectInWindow),
@@ -311,7 +306,6 @@ public final class LiquidGlassSnapshotEnvironment {
             return cropped
         }
 
-        // 4) Если не покрыли (слишком маленький margin или rate-limit не дал обновиться) — ничего не отдаём.
         return nil
     }
 
@@ -341,7 +335,6 @@ public final class LiquidGlassSnapshotEnvironment {
             height: local.size.height * s.scale
         ).integral
 
-        // clamp в границы изображения (на всякий)
         let maxW = CGFloat(s.cgImage.width)
         let maxH = CGFloat(s.cgImage.height)
         if px.origin.x < 0 { px.origin.x = 0 }
