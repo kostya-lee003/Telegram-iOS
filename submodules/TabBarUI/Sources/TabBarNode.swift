@@ -443,6 +443,9 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
     private var glassDragLastX: CGFloat = 0
     private var glassDragLastTime: CFTimeInterval = 0
     private var glassDragVelocityX: CGFloat = 0
+    
+    private var glassDragBoostStartTime: CFTimeInterval = 0
+
 
     private var suppressTapUntil: CFTimeInterval = 0
     
@@ -564,30 +567,6 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
         let now = CACurrentMediaTime()
 
         switch recognizer.state {
-//        case .began:
-//            // touchDownInside: стартуем только анимацию стекла (без смены таба)
-//            if self.isGlassDragging || now < self.suppressTapUntil { return }
-//
-//            let location = recognizer.location(in: self.view)
-//
-//            guard let bottomInset = self.validLayout?.4 else { return }
-//            if location.y > self.bounds.size.height - bottomInset { return }
-//
-//            guard let capsuleFrame = self.lastCapsuleFrame else { return }
-//            guard let index = self.nearestTabIndex(at: location) else { return }
-//
-//            // если это текущий таб — ничего не делаем (bounce оставим на touchUp)
-//            guard index != self.selectedIndex else { return }
-//
-//            // запоминаем, что начали движение на touchDown
-//            self.touchDownPendingIndex = index
-//            self.didStartGlassMoveOnTouchDown = true
-//
-//            // старт движения (из текущего X, чтобы выглядело естественно)
-//            if let target = self.makeGlassFrame(for: index, capsuleFrame: capsuleFrame) {
-//                self.startGlassMove(to: target, fromX: self.glassNode.isHidden ? nil : self.glassNode.frame.origin.x)
-//            }
-
         case .began:
             self.isPressHolding = true
             self.pendingSwitchIsLongTap = false
@@ -629,9 +608,6 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
             if let (gesture, location) = recognizer.lastRecognizedGestureAndLocation {
                 if case .tap = gesture {
 
-                    // Если touchDown начался на одном табе, а отпустили на другом —
-                    // не гасим selectedIndex-анимацию (пусть didSet сделает корректно),
-                    // а “предстарт” отменяем.
                     if let endIndex = self.nearestTabIndex(at: location),
                        let pending = self.touchDownPendingIndex,
                        self.didStartGlassMoveOnTouchDown,
@@ -642,8 +618,6 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
                         self.touchDownPendingIndex = nil
                     }
 
-                    // Если мы уже стартанули движение на touchDown к тому же табу,
-                    // то при смене selectedIndex НЕ запускаем движение второй раз.
                     if let endIndex = self.nearestTabIndex(at: location),
                        let pending = self.touchDownPendingIndex,
                        self.didStartGlassMoveOnTouchDown,
@@ -654,9 +628,6 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
 
                     self.tapped(at: location, longTap: false)
                 } else {
-                    // не tap (например longTap) — откатываем “предстарт” (по желанию),
-                    // сейчас просто сбрасываем состояние
-                    print()
                 }
             }
 
@@ -665,12 +636,10 @@ class TabBarNode: ASDisplayNode, ASGestureRecognizerDelegate {
             self.isPressHolding = false
 
         case .cancelled, .failed:
-            // жест сорвался — просто сбрасываем
             self.touchDownPendingIndex = nil
             self.didStartGlassMoveOnTouchDown = false
             self.isPressHolding = false
             cancelPendingTabSwitch()
-
 
         default:
             break
@@ -1340,20 +1309,12 @@ extension TabBarNode {
         glassAnimBaseFrame = targetFrame
         glassAnimFromX = currentX
         glassAnimToX   = targetFrame.origin.x
-        
-        // Liquid amplitude from velocity
 
-        let travel = abs(glassAnimToX - glassAnimFromX)          // сколько по X проезжаем
-        let v = travel / CGFloat(glassAnimDuration)              // "скорость" в pt / s
-        let referenceV = targetFrame.width / 0.25                // «быстрый свайп» — один таб за 0.25s
+        let maxStretch: CGFloat = 0.50    // +60% к высоте при очень быстрой анимации
+        let maxBrightness: CGFloat = 0.30 // +40% яркости максимум
 
-        let normalizedV = min(1.0, max(0.0, v / referenceV))
-
-        let maxStretch: CGFloat = 0.60    // +60% к высоте при очень быстрой анимации
-        let maxBrightness: CGFloat = 0.40 // +40% яркости максимум
-
-        glassAnimStretchAmplitude = maxStretch * normalizedV
-        glassAnimBrightnessAmplitude = maxBrightness * normalizedV
+        self.glassAnimStretchAmplitude = maxStretch
+        self.glassAnimBrightnessAmplitude = maxBrightness
 
         // на старте никаких лишних бликов
         glassNode.configuration.brightnessBoost = 0.0
@@ -1557,44 +1518,39 @@ private extension TabBarNode {
         let A = glassAnimStretchAmplitude
         if A <= 0.0001 { return 1.0 }
 
-        let phase1End: CGFloat = 0.25
+        let rampUpEnd: CGFloat = 0.25
 
-        if t <= phase1End {
-            let p = max(0.0, min(1.0, t / phase1End))
+        let holdEnd: CGFloat = 0.78
+
+        if t <= rampUpEnd {
+            let p = max(0.0, min(1.0, t / rampUpEnd))
             return 1.0 + A * easeOutCubic(p)
+        } else if t <= holdEnd || self.isPressHolding {
+            return 1.0 + A
         } else {
-            let tailT = max(0.0, min(1.0, (t - phase1End) / (1.0 - phase1End)))
-
-            let damping = exp(-0.1 * tailT)          // Можно регулировать 0.1 - 3.0
-            let oscillation = cos(2.0 * .pi * tailT) // Можно регулировать 2.0 - 8.0
-
-            let offset = A * damping * oscillation
-
-            var value = 1.0 + offset
-            if t > 0.99 {
-                value = 1.0
-            }
-
-            let maxH: CGFloat = 1.0 + A
-            return min(maxH, max(1.0, value))
+            let p = max(0.0, min(1.0, (t - holdEnd) / (1.0 - holdEnd)))
+            let down = 1.0 - easeOutCubic(p)
+            return 1.0 + A * down
         }
     }
 
     private func liquidBrightness(at t: CGFloat) -> CGFloat {
-        let A = glassAnimBrightnessAmplitude
-        if A <= 0.0001 { return 0.0 }
+        let B = glassAnimBrightnessAmplitude
+        if B <= 0.0001 { return 0.0 }
 
-        let stretch = liquidStretch(at: t)
-        let factor = glassAnimStretchAmplitude > 0
-            ? (stretch - 1.0) / glassAnimStretchAmplitude
-            : 0.0
+        let rampUpEnd: CGFloat = 0.25
+        let holdEnd: CGFloat = 0.78
 
-        let base = max(0.0, min(1.0, factor))
-
-        // было exp(-3 * t) → сделаем мягче
-        let tailDamping = exp(-1.2 * t)
-
-        return A * base * tailDamping
+        if t <= rampUpEnd {
+            let p = max(0.0, min(1.0, t / rampUpEnd))
+            return B * easeOutCubic(p)
+        } else if t <= holdEnd || self.isPressHolding {
+            return B
+        } else {
+            let p = max(0.0, min(1.0, (t - holdEnd) / (1.0 - holdEnd)))
+            let down = 1.0 - easeOutCubic(p)
+            return B * down
+        }
     }
     
     // Computes stretch for drag-release settle.
@@ -1787,8 +1743,10 @@ extension TabBarNode: UIGestureRecognizerDelegate {
 
         self.suppressTabItemContextGestures()
         self.glassDragBaseFrame = (self.glassAnimBaseFrame == .zero) ? self.glassNode.frame : self.glassAnimBaseFrame
-        self.isPressHolding = true // если ты используешь hold-логику
+        self.isPressHolding = true
         self.isGlassDragging = true
+        self.glassDragBoostStartTime = now
+
         
         self.glassDragTargetCenterX = location.x
 
@@ -1952,13 +1910,17 @@ extension TabBarNode: UIGestureRecognizerDelegate {
 
         self.glassDragBaseFrame = base
         
-        // Near-max "manual control" physics.
-        let tabW = max(1.0, base.width)
-        let refV = tabW / 0.12
-        let normV = min(1.0, abs(self.glassDragVelocityX) / refV)
+        // Near-max "manual control" physics. (FIX: no velocity dependency)
+        let rampDuration: CGFloat = 0.25
+        let raw = CGFloat(now - self.glassDragBoostStartTime)
+        let p = max(0.0, min(1.0, raw / rampDuration))
+        let ramp = easeOutCubic(p)
 
-        let stretchY: CGFloat = 1.33 + 0.17 * normV          // ~max height
-        let brightness: Float = min(0.20, 0.16 + 0.04 * Float(normV)) // ~max brightness (clamped)
+        let maxStretchAmp: CGFloat = 0.50
+        let maxBrightness: Float = 0.30
+
+        let stretchY: CGFloat = 1.0 + maxStretchAmp * ramp
+        let brightness: Float = maxBrightness * Float(ramp)
 
         let frame = scaledAboutCenter(base, scaleX: 1.0, scaleY: stretchY)
 
