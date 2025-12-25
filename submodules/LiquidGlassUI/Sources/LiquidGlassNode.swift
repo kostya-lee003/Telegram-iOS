@@ -103,6 +103,28 @@ public struct LiquidGlassConfiguration {
     public init() {}
 }
 
+public enum GlassSize {
+    public static let minScale: CGFloat  = 0.8
+    public static let baseScale: CGFloat = 1.2
+    public static let maxScale: CGFloat  = 1.6
+
+    public static let deltaRange: CGFloat = 0.4
+    
+    public static let settleDuration: CFTimeInterval = 0.20
+    public static let settlePhase1End: CGFloat = 0.60
+    public static let settlePhase1Delta: CGFloat = -0.10
+
+    public static let dragWobbleFreqHz: CGFloat = 6.0
+    public static let dragWobbleAmpAtMaxSpeed: CGFloat = 0.04
+
+    public static func referenceVelocity(screenWidth: CGFloat) -> CGFloat {
+        screenWidth / 1.2
+    }
+
+    public static let primeMaxScale: CGFloat = 1.55
+    public static let primeMargin = UIEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
+}
+
 public final class LiquidGlassNode: ASDisplayNode {
 
     public enum UpdateMode {

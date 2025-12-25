@@ -127,29 +127,7 @@ private enum LiquidGlassShaderSource {
         lift = clamp(lift, 0.0, 0.14); // не выходим за 14%
     
         // ---- lens blur (UIVisualEffect-ish) ----
-        float nd = normalizedDist;                 // 0..1
-        float edge = edgeSharp;                    // уже есть
-        float blurK = inside * (0.20 + 0.80 * edge); // blur больше у края, но есть и в центре
-
-        // радиус blur в пикселях: 1..~8 (тюнится)
-        float blurPx = mix(1.2, 8.0, blurK);
-        float2 texel = (blurPx / u.size);
-
-        // 9 taps (крест + диагонали)
-        half3 s0 = bg.sample(s, uvG).rgb;
-        half3 s1 = bg.sample(s, uvG + texel * float2( 1, 0)).rgb;
-        half3 s2 = bg.sample(s, uvG + texel * float2(-1, 0)).rgb;
-        half3 s3 = bg.sample(s, uvG + texel * float2( 0, 1)).rgb;
-        half3 s4 = bg.sample(s, uvG + texel * float2( 0,-1)).rgb;
-        half3 s5 = bg.sample(s, uvG + texel * float2( 1, 1)).rgb;
-        half3 s6 = bg.sample(s, uvG + texel * float2(-1, 1)).rgb;
-        half3 s7 = bg.sample(s, uvG + texel * float2( 1,-1)).rgb;
-        half3 s8 = bg.sample(s, uvG + texel * float2(-1,-1)).rgb;
-
-        half3 blurred = (s0*2.0h + s1+s2+s3+s4 + s5+s6+s7+s8) / half(10.0);
-
-        // подмешиваем blur к текущему outCol
-        outCol.rgb = mix(outCol.rgb, blurred, half(blurK * 0.85));
+        // Blur should be here
         
         // Important: the basic "snapshot" is shown only inside the form
         outCol.rgb *= inside;
@@ -185,6 +163,29 @@ private enum LiquidGlassShaderSource {
 
     """
 }
+//float nd = normalizedDist;                 // 0..1
+//float edge = edgeSharp;                    // уже есть
+//float blurK = inside * (0.20 + 0.80 * edge); // blur больше у края, но есть и в центре
+//
+//// радиус blur в пикселях: 1..~8 (тюнится)
+//float blurPx = mix(1.2, 8.0, blurK);
+//float2 texel = (blurPx / u.size);
+//
+//// 9 taps (крест + диагонали)
+//half3 s0 = bg.sample(s, uvG).rgb;
+//half3 s1 = bg.sample(s, uvG + texel * float2( 1, 0)).rgb;
+//half3 s2 = bg.sample(s, uvG + texel * float2(-1, 0)).rgb;
+//half3 s3 = bg.sample(s, uvG + texel * float2( 0, 1)).rgb;
+//half3 s4 = bg.sample(s, uvG + texel * float2( 0,-1)).rgb;
+//half3 s5 = bg.sample(s, uvG + texel * float2( 1, 1)).rgb;
+//half3 s6 = bg.sample(s, uvG + texel * float2(-1, 1)).rgb;
+//half3 s7 = bg.sample(s, uvG + texel * float2( 1,-1)).rgb;
+//half3 s8 = bg.sample(s, uvG + texel * float2(-1,-1)).rgb;
+//
+//half3 blurred = (s0*2.0h + s1+s2+s3+s4 + s5+s6+s7+s8) / half(10.0);
+//
+//// подмешиваем blur к текущему outCol
+//outCol.rgb = mix(outCol.rgb, blurred, half(blurK * 0.85));
 
 final class LiquidGlassRenderer: NSObject, MTKViewDelegate {
 
