@@ -703,6 +703,9 @@ public protocol CustomViewControllerNavigationDataSummary: AnyObject {
     open func tabBarItemContextAction(sourceView: ContextExtractedContentContainingView, gesture: ContextGesture) {
     }
     
+    open func tabBarItemContextAction(sourceNode: ContextExtractedContentContainingNode, gesture: ContextGesture) {
+    }
+    
     open func tabBarDisabledAction() {
     }
     

@@ -778,6 +778,23 @@ public final class CallListController: TelegramBaseController {
         let controller = ContextController(presentationData: self.presentationData, source: .reference(CallListTabBarContextReferenceContentSource(controller: self, sourceView: sourceView)), items: .single(ContextController.Items(content: .list(items))), recognizer: nil, gesture: gesture)
         self.context.sharedContext.mainWindow?.presentInGlobalOverlay(controller)
     }
+    
+//    override public func tabBarItemContextAction(sourceNode: ContextExtractedContentContainingNode, gesture: ContextGesture) {
+//        var items: [ContextMenuItem] = []
+//        items.append(.action(ContextMenuActionItem(text: self.presentationData.strings.Contacts_AddContact, icon: { theme in
+//            return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/AddUser"), color: theme.contextMenu.primaryColor)
+//        }, action: { [weak self] c, f in
+//            c?.dismiss(completion: { [weak self] in
+//                guard let strongSelf = self else {
+//                    return
+//                }
+//                strongSelf.addPressed()
+//            })
+//        })))
+//        
+//        let controller = ContextController(presentationData: self.presentationData, source: .extracted(ContactsTabBarContextExtractedContentSource(controller: self, sourceNode: sourceNode)), items: .single(ContextController.Items(content: .list(items))), recognizer: nil, gesture: gesture)
+//        self.context.sharedContext.mainWindow?.presentInGlobalOverlay(controller)
+//    }
 }
 
 private final class CallListTabBarContextReferenceContentSource: ContextReferenceContentSource {
